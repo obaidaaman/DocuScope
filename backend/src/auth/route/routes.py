@@ -21,14 +21,13 @@ async def register(data: Register, db: AsyncSession = Depends(get_db)):
 
 @router.post("/login")
 async def login(data: Login, response: Response, db: AsyncSession = Depends(get_db)):
-    # Yahan FastAPI automatically JSON data ko Pydantic 'Login' model me parse karta hai,
-    # aur get_db() se AsyncSession nikal kar db parameter me bhej deta hai.
+   
     return await login_controller(data, db, response)
 
 
 @router.post("/refresh")
 async def refresh_token(request: Request, response: Response, db: AsyncSession = Depends(get_db)):
-    # Yahan Request and Response object isliye hain taaki controller cookies padh/set sake
+
     return await refresh_access_token_controller(request, response, db)
 
 

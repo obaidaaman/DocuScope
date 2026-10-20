@@ -25,10 +25,11 @@ openai==1.82.0
 langchain-openai==0.3.18
 langgraph==0.4.7
 langgraph-checkpoint-postgres==2.0.18
-unstructured-transform-client
+unstructured-transform-client==0.18.27
 # ── Rate Limiting ──
 slowapi==0.1.9
-
+supabase
+python-multipart
 # ── Logging ──
 structlog==25.1.0
 
