@@ -30,7 +30,7 @@ class TopicCluster(BaseModel):
 
 class ReconciliationRequest(BaseModel):
     doc_ids: List[int] = Field(..., min_length=2, description="At least 2 document IDs to reconcile")
-    similarity_threshold: float = Field(default=0.78, ge=0.5, le=1.0, description="Minimum cosine similarity")
+    similarity_threshold: float = Field(default=0.65, ge=0.5, le=1.0, description="Minimum cosine similarity")
     max_pairs: int = Field(default=300, ge=10, le=2000, description="Maximum matching pairs to retrieve")
     thread_id: Optional[str] = Field(default=None, description="Optional thread/run ID. Generated if omitted.")
 
