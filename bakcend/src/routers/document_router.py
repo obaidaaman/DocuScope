@@ -1,6 +1,6 @@
 from fastapi import APIRouter, UploadFile, File, BackgroundTasks, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 from ..database import get_db
 from ..controller import (
@@ -16,12 +16,14 @@ router = APIRouter(prefix="/documents", tags=["documents"])
 async def upload_documents(
     background_tasks: BackgroundTasks,
     files: List[UploadFile] = File(...),
+    project_id: Optional[int] = None,
     db: AsyncSession = Depends(get_db)
 ) -> Dict[str, Any]:
     return await upload_documents_controller(
         files=files,
         background_tasks=background_tasks,
-        db=db
+        db=db,
+        project_id=project_id
     )
 
 @router.get("/{document_id}")
