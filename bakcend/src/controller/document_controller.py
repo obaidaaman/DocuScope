@@ -2,11 +2,10 @@ import os
 import shutil
 import hashlib
 import asyncio
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from fastapi import UploadFile, HTTPException, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-
 from ..models.db_models import Document, DocumentChunk
 from ..ingestion.pipeline import run_document_ingestion
 
@@ -30,7 +29,8 @@ async def dispatch_parallel_ingestion(tasks: List[Dict[str, Any]]):
 async def upload_documents_controller(
     files: List[UploadFile],
     background_tasks: BackgroundTasks,
-    db: AsyncSession
+    db: AsyncSession,
+    project_id: Optional[int] = None
 ) -> Dict[str, Any]:
     queued_tasks: List[Dict[str, Any]] = []
     response_items: List[Dict[str, Any]] = []
@@ -71,7 +71,8 @@ async def upload_documents_controller(
             filename=file.filename,
             file_hash=file_hash,
             storage_path=final_path,
-            status="QUEUED"
+            status="QUEUED",
+            project_id=project_id
         )
         db.add(new_doc)
         await db.commit()
