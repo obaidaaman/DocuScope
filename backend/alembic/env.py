@@ -20,7 +20,7 @@ if config.config_file_name is not None:
 load_dotenv()
 config.set_main_option(
     "sqlalchemy.url", 
-    os.getenv("DATABASE_URL", "postgresql+asyncpg://analyst:analyst_secret@localhost:5432/vendor_analyst")
+    os.getenv("DATABASE_URL", "postgresql+asyncpg://analyst:analyst_secret@localhost:5433/vendor_analyst")
 )
 
 

@@ -6,7 +6,7 @@ import jwt
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
- from src.models.db_models import Organization
+from src.models.db_models import Organization
 from src.models.db_models import User, RefreshToken
 from src.auth.models.auth_model import Login, Register
 
