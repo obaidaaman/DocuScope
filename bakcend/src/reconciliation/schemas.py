@@ -28,9 +28,17 @@ class TopicCluster(BaseModel):
     passages: List[Passage]
     total_chunks: int
 
+class TopicAnchor(BaseModel):
+    topic_name: str = Field(description="Concise topic title, e.g. 'Hourly Billing Rates & Caps'")
+    description: str = Field(description="Brief explanation of what is being cross-reconciled")
+    search_query: str = Field(description="Dense semantic search phrase containing key terms and figures to retrieve chunks via vector search")
+
+class DiscoveredTopics(BaseModel):
+    topics: List[TopicAnchor] = Field(description="List of 3 to 6 key comparative topics across the documents")
+
 class ReconciliationRequest(BaseModel):
     doc_ids: List[int] = Field(..., min_length=2, description="At least 2 document IDs to reconcile")
-    similarity_threshold: float = Field(default=0.65, ge=0.5, le=1.0, description="Minimum cosine similarity")
+    similarity_threshold: float = Field(default=0.45, ge=0.2, le=1.0, description="Minimum cosine similarity for topic chunk retrieval")
     max_pairs: int = Field(default=300, ge=10, le=2000, description="Maximum matching pairs to retrieve")
     thread_id: Optional[str] = Field(default=None, description="Optional thread/run ID. Generated if omitted.")
 

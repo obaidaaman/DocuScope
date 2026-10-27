@@ -13,10 +13,15 @@ async def create_project_controller(
 ) -> Dict[str, Any]:
     target_org_id = org_id or current_user.org_id
 
-    if target_org_id:
-        org = await db.get(Organization, target_org_id)
-        if not org:
-            raise HTTPException(status_code=404, detail="Organization not found")
+    if not target_org_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Organization is required. Please set up or join an organization before creating a project."
+        )
+
+    org = await db.get(Organization, target_org_id)
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
 
     new_project = Project(
         name=name,

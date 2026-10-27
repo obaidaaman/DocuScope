@@ -41,9 +41,11 @@ async def evaluate_single_dabba(
             )
         formatted_context = "\n\n".join(passages_text)
 
+        topic_header = f"RECONCILIATION TOPIC: {cluster.topic_hint}" if cluster.topic_hint else f"TOPIC CLUSTER #{cluster.dabba_id}"
+
         prompt = f"""{JUDGE_SYSTEM_PROMPT}
 
-PASSAGES FOR TOPIC CLUSTER #{cluster.dabba_id}:
+{topic_header}:
 {formatted_context}
 
 Provide your structured verdict:"""
