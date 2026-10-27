@@ -6,7 +6,7 @@ from typing import List, Dict, Any, Optional
 from fastapi import UploadFile, HTTPException, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from ..models.db_models import Document, DocumentChunk
+from ..models.db_models import Document, DocumentChunk, Project
 from ..ingestion.pipeline import run_document_ingestion
 
 STORAGE_DIR = os.path.join(os.getcwd(), "storage")
@@ -32,6 +32,25 @@ async def upload_documents_controller(
     db: AsyncSession,
     project_id: Optional[int] = None
 ) -> Dict[str, Any]:
+    if not project_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Project ID is required. Please create or select a project folder before uploading documents."
+        )
+
+    project = await db.get(Project, project_id)
+    if not project:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Project with ID {project_id} not found."
+        )
+
+    if not project.org_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Organization not found for this project. An organization must be created before starting document ingestion."
+        )
+
     queued_tasks: List[Dict[str, Any]] = []
     response_items: List[Dict[str, Any]] = []
 
@@ -57,6 +76,10 @@ async def upload_documents_controller(
         if existing_doc:
             if os.path.exists(temp_path):
                 os.remove(temp_path)
+            if existing_doc.project_id is None:
+                existing_doc.project_id = project_id
+                await db.commit()
+                await db.refresh(existing_doc)
             response_items.append({
                 "filename": file.filename,
                 "status": "ALREADY_EXISTS",

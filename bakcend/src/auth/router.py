@@ -10,7 +10,8 @@ from .controller import (
     register_controller,
     login_controller,
     refresh_access_token_controller,
-    revoke_refresh_token_controller
+    revoke_refresh_token_controller,
+    create_organization_controller
 )
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -58,3 +59,16 @@ async def get_me(
         phone=current_user.phone,
         org_id=current_user.org_id
     )
+
+@router.post("/organization")
+async def create_organization(
+    data: Dict[str, str],
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+) -> Dict[str, Any]:
+    return await create_organization_controller(
+        org_name=data.get("name", ""),
+        current_user=current_user,
+        db=db
+    )
+

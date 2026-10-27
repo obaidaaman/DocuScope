@@ -225,3 +225,26 @@ async def revoke_refresh_token_controller(request: Request, response: Response, 
     response.delete_cookie(key="access_token")
     response.delete_cookie(key="refresh_token")
     return {"success": True, "message": "Logged out successfully"}
+
+async def create_organization_controller(org_name: str, current_user: User, db: AsyncSession) -> Dict[str, Any]:
+    if not org_name or not org_name.strip():
+        raise HTTPException(status_code=400, detail="Organization name is required")
+        
+    new_org = Organization(name=org_name.strip())
+    db.add(new_org)
+    await db.flush()
+    
+    current_user.org_id = new_org.id
+    await db.commit()
+    await db.refresh(new_org)
+    await db.refresh(current_user)
+    
+    return {
+        "success": True,
+        "message": "Organization created and linked successfully",
+        "organization": {
+            "id": new_org.id,
+            "name": new_org.name
+        }
+    }
+
