@@ -18,11 +18,21 @@ async def lifespan(app: FastAPI):
     yield
     await engine.dispose()
 
+from fastapi.middleware.cors import CORSMiddleware
+
 app = FastAPI(
     title="SuperDocs Analyst Ingestion Engine",
     description="Multimodal Document Ingestion, Auth, Multi-Tenancy & Reconciliation with pgvector",
     version="1.0.0",
     lifespan=lifespan
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 app.include_router(auth_router)

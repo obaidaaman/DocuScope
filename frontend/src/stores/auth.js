@@ -33,6 +33,7 @@ export const useAuthStore = defineStore('auth', () => {
     const { data } = await api.post('/auth/organization', { name })
     if (user.value) {
       user.value.org_id = data.organization.id
+      user.value.org_name = data.organization.name
     }
     return data.organization
   }
