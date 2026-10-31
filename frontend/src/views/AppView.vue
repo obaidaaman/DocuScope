@@ -22,11 +22,6 @@ const showCustomModal = ref(false)
 const selectedReviewItem = ref(null)
 const reportCopied = ref(false)
 
-// File upload state
-const fileInput = ref(null)
-const isDragging = ref(false)
-const uploadMessage = ref('')
-
 // Auto polling interval for in-flight documents
 let pollTimer = null
 
@@ -37,6 +32,14 @@ onMounted(async () => {
 
 onUnmounted(() => {
   stopPolling()
+})
+
+watch(activeTab, async (newTab) => {
+  if (newTab === 'review' && workspace.activeThreadId) {
+    await workspace.fetchReviewItems(workspace.activeThreadId)
+  } else if (newTab === 'deliverable' && workspace.activeThreadId) {
+    await workspace.fetchDeliverables(workspace.activeThreadId)
+  }
 })
 
 function startPolling() {
@@ -71,59 +74,6 @@ async function handleCreateProject(name) {
   await workspace.createProject(name, auth.user?.org_id)
 }
 
-function openFileDialog() {
-  if (workspace.isUploading) return
-  if (!workspace.currentProjectId) {
-    workspace.actionError = 'Please select or create a project first before uploading documents.'
-    showNewProjectModal.value = true
-    return
-  }
-  fileInput.value?.click()
-}
-
-// 2. Documents
-function onFileSelect(e) {
-  const files = Array.from(e.target.files || [])
-  triggerUpload(files)
-}
-
-function onFileDrop(e) {
-  isDragging.value = false
-  const files = Array.from(e.dataTransfer?.files || [])
-  triggerUpload(files)
-}
-
-async function triggerUpload(files) {
-  if (!files.length) return
-  if (!workspace.currentProjectId) {
-    workspace.actionError = 'Please select or create a project first before uploading documents.'
-    showNewProjectModal.value = true
-    return
-  }
-  const nonPdfs = files.filter(f => !f.name.toLowerCase().endsWith('.pdf'))
-  if (nonPdfs.length > 0) {
-    workspace.actionError = 'Only PDF documents are currently supported by the extraction pipeline.'
-    return
-  }
-  try {
-    uploadMessage.value = ''
-    const res = await workspace.uploadDocuments(files)
-    if (res) {
-      uploadMessage.value = res.message || `${files.length} document(s) uploaded.`
-    }
-  } catch {
-    // error handled in store
-  } finally {
-    if (fileInput.value) fileInput.value.value = ''
-  }
-}
-
-function inspectDoc(doc) {
-  inspectedDocId.value = doc.id
-  inspectedDocName.value = doc.filename
-  showChunksModal.value = true
-}
-
 function inspectDocById(docId) {
   const doc = workspace.currentDocs.find(d => d.id === docId)
   inspectedDocId.value = docId
@@ -132,15 +82,6 @@ function inspectDocById(docId) {
 }
 
 // 3. Reconcile selection helpers
-function toggleDocSelection(docId) {
-  const idx = workspace.selectedDocIds.indexOf(docId)
-  if (idx > -1) {
-    workspace.selectedDocIds.splice(idx, 1)
-  } else {
-    workspace.selectedDocIds.push(docId)
-  }
-}
-
 function selectAllParsed() {
   workspace.selectedDocIds = workspace.parsedDocs.map(d => d.id)
 }
@@ -154,6 +95,16 @@ async function onPreviewClusters() {
     await workspace.previewClusters()
   } catch {
     // handled
+  }
+}
+
+async function onRunLiveReconciliation() {
+  try {
+    await workspace.startLiveReconciliation((nextTab) => {
+      activeTab.value = nextTab
+    })
+  } catch {
+    // handled in store
   }
 }
 
@@ -334,6 +285,17 @@ function downloadReport() {
         </button>
       </nav>
 
+      <!-- Live WebSocket Pipeline Streaming Ribbon -->
+      <div v-if="workspace.livePipelineActive" class="live-stream-ribbon">
+        <div class="stream-pulse"></div>
+        <div class="stream-meta">
+          <span class="stream-tag">LIVE WEBSOCKET STREAM</span>
+          <strong class="stream-stage">NODE: {{ workspace.liveStatusStage || 'EXECUTING' }}</strong>
+          <span class="stream-sep">—</span>
+          <span class="stream-msg">{{ workspace.liveStatusMessage }}</span>
+        </div>
+      </div>
+
       <!-- Global Error Banner -->
       <div v-if="workspace.actionError" class="error-banner">
         <span>⚠ {{ workspace.actionError }}</span>
@@ -341,23 +303,22 @@ function downloadReport() {
       </div>
 
       <!-- ========================================================================= -->
-      <!-- TAB 1: Documents & Ingestion (Windows OS Folder & File Explorer) -->
+      <!-- TAB 1: Documents & Ingestion -->
       <!-- ========================================================================= -->
       <section v-if="activeTab === 'documents'" class="tab-content">
         <div class="content-header">
           <div>
             <span class="label faint">Pipeline Stage 01</span>
-            <h2>Workspace Explorer & Ingestion Gateway</h2>
+            <h2>Organization, Projects & Documents</h2>
             <p class="soft">
-              Hierarchical folder system structured by Organization, Project Folders, and Documents. Organizations and Projects are strictly required before ingestion.
+              Manage your organization, select a project, and upload PDF documents for reconciliation.
             </p>
           </div>
         </div>
 
-        <!-- Windows Operating System Style File Explorer -->
         <FileExplorer
           :on-open-chunks="inspectDocById"
-          :on-proceed-to-reconcile="() => { activeTab = 'clustering' }"
+          :on-proceed-to-reconcile="(tab) => { activeTab = (tab || 'reconcile') }"
           @open-new-project-modal="showNewProjectModal = true"
         />
       </section>
@@ -433,10 +394,10 @@ function downloadReport() {
 
             <button
               class="btn btn-ink"
-              :disabled="workspace.selectedDocIds.length < 2 || workspace.isReconciling"
-              @click="onRunReconciliation"
+              :disabled="workspace.selectedDocIds.length < 2 || workspace.livePipelineActive || workspace.isReconciling"
+              @click="onRunLiveReconciliation"
             >
-              {{ workspace.isReconciling ? 'Running LLM Judge Pipeline…' : 'Run Full Reconciliation ⚡' }}
+              {{ workspace.livePipelineActive ? 'Streaming Live Pipeline…' : 'Run Live Reconciliation ⚡' }}
             </button>
           </div>
         </div>
@@ -1420,6 +1381,7 @@ th {
   font-size: 15px;
   line-height: 1.6;
   color: var(--ink);
+  white-space: pre-wrap;
 }
 
 .deliv-citations {
@@ -1449,6 +1411,48 @@ th {
   font-size: 11px;
   color: var(--copper);
   white-space: nowrap;
+}
+
+.live-stream-ribbon {
+  background: #14130F;
+  border: 1px solid #C2A45C;
+  border-radius: 6px;
+  padding: 10px 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 20px;
+  box-shadow: 0 4px 14px rgba(0,0,0,0.2);
+}
+.stream-pulse {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #107C10;
+  box-shadow: 0 0 8px #107C10;
+  animation: pulse 1.5s infinite;
+}
+.stream-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+.stream-tag {
+  background: #C2A45C;
+  color: #14130F;
+  font-size: 10px;
+  font-weight: 800;
+  padding: 2px 7px;
+  border-radius: 3px;
+  letter-spacing: 0.5px;
+}
+.stream-stage {
+  color: #C2A45C;
+  font-weight: 700;
+}
+.stream-msg {
+  color: #F0EBE1;
 }
 
 @media (max-width: 900px) {

@@ -60,10 +60,12 @@ async def run_reconciliation_controller(
     initial_state = {
         "thread_id": thread_id,
         "doc_ids": request.doc_ids,
+        "doc_paths": None,
         "similarity_threshold": request.similarity_threshold,
         "max_pairs": request.max_pairs,
         "clusters": [],
         "verdicts": [],
+        "review_items": [],
         "error": None
     }
 
@@ -154,21 +156,69 @@ async def resolve_review_items_controller(
             continue
 
         item.status = "RESOLVED"
-        resolution_note = f"Action: {res_action.action}"
-        if res_action.chosen_doc_id:
-            resolution_note += f" | Adopted Doc ID: {res_action.chosen_doc_id}"
-        if res_action.custom_text:
-            resolution_note += f" | Custom Resolution: {res_action.custom_text}"
-        item.resolution_notes = resolution_note
+        section_title = item.category
+        matching_citations = []
+        committed_text = ""
 
-        if res_action.action in ["APPROVE_DOC", "CUSTOM_RESOLUTION"]:
-            committed_text = res_action.custom_text or item.summary
+        # 1. APPROVE_DOC: Dynamically extract adopted document's verbatim clause & filter citations
+        if res_action.action == "APPROVE_DOC" and res_action.chosen_doc_id:
+            chosen_doc = await db.get(Document, res_action.chosen_doc_id)
+            doc_name = chosen_doc.filename if chosen_doc else f"Doc #{res_action.chosen_doc_id}"
+
+            # Keep only the citations from the winning approved document
+            matching_citations = [
+                c for c in (item.citations_json or [])
+                if c.get("doc_id") == res_action.chosen_doc_id
+            ]
+
+            if matching_citations:
+                quotes_text = "\n\n".join([f'"{c.get("exact_quote")}"' for c in matching_citations if c.get("exact_quote")])
+                committed_text = f"**Adopted Term from {doc_name}:**\n\n{quotes_text}"
+            else:
+                committed_text = f"**Adopted Term from {doc_name}**"
+
+            item.resolution_notes = f"Action: APPROVE_DOC | Adopted: {doc_name}"
+
+        # 2. CUSTOM_RESOLUTION: Analyst provided explicit negotiated clause
+        elif res_action.action == "CUSTOM_RESOLUTION" and res_action.custom_text:
+            committed_text = f"**Analyst Negotiated Resolution:**\n\n{res_action.custom_text}"
+            matching_citations = []
+            item.resolution_notes = f"Action: CUSTOM_RESOLUTION | {res_action.custom_text}"
+
+        # 3. REJECT: Explicit rejection note with audit trail (no silent deletion)
+        elif res_action.action == "REJECT":
+            section_title = f"{item.category} (Rejected)"
+            committed_text = (
+                f"**Clause Rejected / Omitted:**\n\n"
+                f"The contradictory terms for *{item.category}* across documents were explicitly "
+                f"rejected during legal review and are excluded from the reconciled agreement."
+            )
+            matching_citations = []
+            item.resolution_notes = "Action: REJECT"
+
+        else:
+            committed_text = item.summary
+            matching_citations = item.citations_json or []
+
+        # Idempotent: Update existing DeliverableSection or insert a new one
+        stmt = select(DeliverableSection).where(
+            DeliverableSection.run_thread_id == request.thread_id,
+            DeliverableSection.category == item.category
+        )
+        res = await db.execute(stmt)
+        existing_section = res.scalar_one_or_none()
+
+        if existing_section:
+            existing_section.title = section_title
+            existing_section.committed_markdown = committed_text
+            existing_section.citations_json = matching_citations
+        else:
             new_section = DeliverableSection(
                 run_thread_id=request.thread_id,
                 category=item.category,
-                title=item.category,
+                title=section_title,
                 committed_markdown=committed_text,
-                citations_json=item.citations_json
+                citations_json=matching_citations
             )
             db.add(new_section)
 
