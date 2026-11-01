@@ -16,9 +16,9 @@ async def execute_live_pipeline_workflow(
     All real-time progress events are emitted by the respective LangGraph nodes.
     """
     doc_ids = [d["doc_id"] for d in doc_paths]
-    print(f"🚀 [LangGraph Pipeline Started] Thread: {thread_id} | Docs: {doc_ids}")
+    print(f"LangGraph Pipeline Started Thread: {thread_id} | Docs: {doc_ids}")
 
-    # Small delay (800ms) to allow the frontend WebSocket handshake to complete
+    
     await asyncio.sleep(0.8)
 
     initial_state: ReconciliationState = {
