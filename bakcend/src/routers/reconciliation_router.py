@@ -14,6 +14,7 @@ from ..database import get_db, AsyncSessionLocal
 from ..models.db_models import Project, Document
 from ..websocket.manager import ws_manager
 from ..reconciliation.schemas import (
+    ComplianceCheckRequest,
     ReconciliationRequest,
     ReconciliationResponse,
     ResolveReviewItemsRequest
@@ -23,6 +24,9 @@ from ..controller.reconciliation_controller import (
     run_reconciliation_controller,
     get_review_items_controller,
     get_deliverable_sections_controller,
+    get_compliance_audit_controller,
+    start_compliance_check_controller,
+    finalize_deliverable_controller,
     resolve_review_items_controller
 )
 from ..reconciliation.live_pipeline import execute_live_pipeline_workflow
@@ -235,6 +239,36 @@ async def get_deliverable_sections(
     db: AsyncSession = Depends(get_db)
 ) -> List[Dict[str, Any]]:
     return await get_deliverable_sections_controller(thread_id=thread_id, db=db)
+
+
+@router.get("/{thread_id}/compliance")
+async def get_compliance_audit(
+    thread_id: str,
+    db: AsyncSession = Depends(get_db)
+) -> Dict[str, Any]:
+    return await get_compliance_audit_controller(thread_id=thread_id, db=db)
+
+
+@router.post("/{thread_id}/compliance")
+async def start_compliance_check(
+    thread_id: str,
+    request: ComplianceCheckRequest,
+    db: AsyncSession = Depends(get_db)
+) -> Dict[str, Any]:
+    return await start_compliance_check_controller(
+        thread_id=thread_id,
+        request=request,
+        db=db,
+    )
+
+
+@router.post("/{thread_id}/finalize")
+async def finalize_deliverable(
+    thread_id: str,
+    db: AsyncSession = Depends(get_db)
+) -> Dict[str, Any]:
+    return await finalize_deliverable_controller(thread_id=thread_id, db=db)
+
 
 @router.post("/resolve-gate")
 async def resolve_review_items(

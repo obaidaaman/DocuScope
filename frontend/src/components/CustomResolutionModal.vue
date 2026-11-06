@@ -46,14 +46,14 @@ async function handleResolve() {
       <div class="modal-head">
         <div>
           <span class="label gold">Human Review Gate</span>
-          <h3>Custom Contractual Resolution</h3>
+          <h3>{{ item.item_type === 'COMPLIANCE' ? 'Rewrite Deliverable Section' : 'Custom Contractual Resolution' }}</h3>
           <p class="topic-meta">{{ item.category }}</p>
         </div>
         <button class="btn-close" @click="handleClose" aria-label="Close">✕</button>
       </div>
 
       <div class="summary-box">
-        <span class="label faint">Disagreement Summary</span>
+        <span class="label faint">{{ item.item_type === 'COMPLIANCE' ? 'Compliance Finding' : 'Disagreement Summary' }}</span>
         <p>{{ item.summary }}</p>
       </div>
 
@@ -61,7 +61,9 @@ async function handleResolve() {
         <div v-if="error" class="form-error">{{ error }}</div>
 
         <div class="field">
-          <label for="custom-clause">Final Agreed Clause Text (To be Committed)</label>
+          <label for="custom-clause">
+            {{ item.item_type === 'COMPLIANCE' ? 'Revised Section Text' : 'Final Agreed Clause Text (To be Committed)' }}
+          </label>
           <textarea
             id="custom-clause"
             v-model="customText"

@@ -22,15 +22,17 @@ The system accepts related documents in supported formats and:
 * generates a grounded report, brief, or register,
 * links claims back to their exact source locations.
 
-### 2. Examine
+### 2. Reconcile and review
 
-Users can provide rules such as:
+The existing reconciliation pipeline generates a draft deliverable and routes conflicts through its human review gate. Once conflicts are resolved, the user selects a document from the active project as the source of truth. If it is still processing, the user waits for parsing to finish; failed parsing is retried. The user then explicitly starts the comparison.
 
-* compliance checklists,
-* contract playbooks,
-* style guides.
+The source-of-truth comparison checks the deliverable against the selected document and applies a demo grounding checklist:
 
-The agent checks both the source documents and the generated deliverable against those rules and produces findings with supporting evidence.
+* every source-derived section must include a citation,
+* each citation must match text on the cited document page,
+* each material deliverable claim is checked against the selected source of truth.
+
+Findings enter the same human review gate as conflicts: analysts can approve a section as-is, rewrite it, or reject it. The audit reruns after compliance decisions. The ultimate final report can only be finalized and exported after every conflict and compliance item has been resolved. This demo checklist verifies source grounding; it is not a legal or regulatory compliance assessment.
 
 A clean document set can legitimately produce **no findings**.
 
@@ -87,6 +89,7 @@ The workflow is durable, resumable, and designed to prevent unsupported claims.
 * Rule/checklist evaluation
 * Incremental document updates
 * Human approval at item level
+* Final deliverable comparison against cited source documents
 * Resumable workflows
 * Machine-driven execution through MCP
 * Concurrent run isolation

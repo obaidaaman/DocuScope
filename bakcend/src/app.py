@@ -15,6 +15,15 @@ async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector;"))
         await conn.run_sync(Base.metadata.create_all)
+        await conn.execute(text(
+            "ALTER TABLE compliance_audits "
+            "ADD COLUMN IF NOT EXISTS finalized BOOLEAN NOT NULL DEFAULT FALSE"
+        ))
+        await conn.execute(text(
+            "ALTER TABLE compliance_audits "
+            "ADD COLUMN IF NOT EXISTS source_truth_doc_id INTEGER "
+            "REFERENCES documents(id) ON DELETE SET NULL"
+        ))
     yield
     await engine.dispose()
 

@@ -125,3 +125,22 @@ class DeliverableSection(Base):
     committed_markdown: Mapped[str] = mapped_column(Text, nullable=False)
     citations_json: Mapped[Optional[Any]] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class ComplianceAudit(Base):
+    __tablename__ = "compliance_audits"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    run_thread_id: Mapped[str] = mapped_column(String(100), unique=True, index=True, nullable=False)
+    status: Mapped[str] = mapped_column(String(50), nullable=False)
+    result_json: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    source_truth_doc_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("documents.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    finalized: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    checked_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
