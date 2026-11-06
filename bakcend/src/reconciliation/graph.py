@@ -5,7 +5,13 @@ from langgraph.graph import StateGraph, START, END
 from sqlalchemy import select, delete
 
 from ..database import AsyncSessionLocal
-from ..models.db_models import Document, DocumentChunk, ReviewItem, DeliverableSection
+from ..models.db_models import (
+    ComplianceAudit,
+    Document,
+    DocumentChunk,
+    ReviewItem,
+    DeliverableSection,
+)
 from ..websocket.manager import ws_manager
 from ..ingestion.pipeline import run_document_ingestion
 from .clusterer import build_topic_clusters
@@ -227,6 +233,7 @@ async def persist_results_node(state: ReconciliationState) -> Dict[str, Any]:
             # Delete any existing review items or deliverable sections for this thread (idempotency)
             await session.execute(delete(ReviewItem).where(ReviewItem.run_thread_id == thread_id))
             await session.execute(delete(DeliverableSection).where(DeliverableSection.run_thread_id == thread_id))
+            await session.execute(delete(ComplianceAudit).where(ComplianceAudit.run_thread_id == thread_id))
 
             for v in verdicts:
                 status = v.get("status")

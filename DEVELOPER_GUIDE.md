@@ -19,7 +19,7 @@ flowchart TD
     subgraph Server["Backend (FastAPI)"]
         Router["FastAPI Routers (auth, project, document, reconciliation)"]
         Controller["Controllers & Business Logic"]
-        LangGraphPipe["LangGraph Reconciliation Engine (graph.py)"]
+        LangGraphPipe["LangGraph Pipeline (reconciliation and draft deliverable)"]
         WSManager["WebSocket Connection Manager (ws_manager)"]
     end
 
@@ -118,7 +118,7 @@ erDiagram
     REVIEW_ITEMS {
         int id PK
         string run_thread_id
-        string item_type "CONFLICT"
+        string item_type "CONFLICT | COMPLIANCE"
         string category
         string severity "HIGH | MEDIUM | LOW | NONE"
         text summary
@@ -137,6 +137,16 @@ erDiagram
         jsonb citations_json
         datetime created_at
     }
+
+    COMPLIANCE_AUDITS {
+        int id PK
+        string run_thread_id UK
+        string status
+        jsonb result_json
+        int source_truth_doc_id FK
+        boolean finalized
+        datetime checked_at
+    }
 ```
 
 ### Table Roles & Key Columns
@@ -154,12 +164,13 @@ erDiagram
    - `citations_json`: Array of `{ doc_id, page_number, exact_quote }`.
    - `status`: `PENDING` $\to$ `RESOLVED`.
 7. **`deliverable_sections`**: The finalized clauses committed to the final report (both direct agreements and human-resolved conflicts).
+8. **`compliance_audits`**: The latest per-run comparison of committed sections against their cited source pages and the demo grounding checklist.
 
 ---
 
 ## 3. End-to-End Lifecycle & Database Updates
 
-The application lifecycle proceeds through four core stages.
+The application lifecycle proceeds through five core stages.
 
 ### Stage 1: Ingestion & Enrichment Flow
 
@@ -259,7 +270,7 @@ sequenceDiagram
 
 ---
 
-### Stage 3: Human-in-the-Loop Review Gate & Deliverable Compilation
+### Stage 3: Initial Human-in-the-Loop Review Gate & Draft Compilation
 
 When conflicts are detected, they appear in Tab 3 ("Conflict Review Gate").
 
@@ -286,13 +297,21 @@ flowchart TD
     DBUpdate --> Deliv["Final Grounded Deliverable Register\n(deliverable_sections table)"]
 ```
 
+Once all initial conflicts are resolved, the user sees the draft deliverable and selects a document from the active project on that page. Documents that are queued or processing finish ingestion before comparison is enabled; a failed document is retried when selected. The user then explicitly starts comparison with the Compare button, which calls `POST /reconciliation/{thread_id}/compliance`. Findings use `ReviewItem.item_type = "COMPLIANCE"` and return to the same human review gate. Resolving a compliance item records the analyst decision and updates the audit from remaining review items without rerunning embeddings or the LLM. Resolving initial reconciliation conflicts does not call compliance or fetch a compliance audit. Only a compliant or human-approved audit with no pending review items can be finalized.
+
 ---
 
 ## 4. Grounded Deliverable Register & Export Mechanics
 
 The deliverable is the final synthesis fulfilling the core requirement: **"produces one grounded deliverable... Every claim in the deliverable traces to the exact place in the sources it came from."**
 
-### 4.1 How Deliverables Are Stored in Database
+### 4.1 Explicit Source-of-Truth Comparison
+
+The reconciliation graph ends after creating draft deliverable sections and conflict review items; it does not automatically start compliance. After initial conflicts are resolved, the user chooses a parsed document from the active project and starts `POST /reconciliation/{thread_id}/compliance` with its document ID. `compliance.py` verifies citation coverage and quoted evidence, then compares deliverable sections to candidate source passages. It batches section embeddings, merges vector candidates with PostgreSQL full-text candidates, expands candidates to adjacent chunks, deduplicates them, and sends up to eight section comparisons per structured LLM request. Similarity is candidate retrieval only; the judge decides whether content conflicts. This adapts the staged retrieval and batched-inference approach described in [Detecting Semantic Conflicts Between Documents](https://anatoly.cloud/research/detecting-semantic-conflicts-documents). Findings are persisted as `COMPLIANCE` review items in the same human-in-the-loop review gate. Analysts can approve a flagged section as-is, rewrite it, or reject it. Resolving a compliance finding updates the audit using the saved human decision and pending-review queue; it does not rerun comparison inside `resolve-gate`. The ultimate final deliverable is only marked final through `POST /reconciliation/{thread_id}/finalize`, after all conflict and compliance review items are resolved.
+
+The selected document ID is stored in `compliance_audits.source_truth_doc_id`. The built-in checklist is a demo grounding policy, not a configurable legal or regulatory compliance standard. Results are stored in `compliance_audits`, exposed at `GET /reconciliation/{thread_id}/compliance`, and streamed as `COMPLIANCE_CHECK_COMPLETE`. Final report copy/download is enabled only after finalization and includes a compliance sign-off summary.
+
+### 4.2 How Deliverables Are Stored in Database
 
 Deliverables are persisted in the `deliverable_sections` table. A deliverable section is created in two ways:
 1. **Automated Agreements**: Directly committed when the LLM Judge identifies unanimous alignment across documents.
@@ -332,7 +351,7 @@ CREATE TABLE deliverable_sections (
 
 ---
 
-### 4.2 How the Deliverable Looks in the UI
+### 4.3 How the Deliverable Looks in the UI
 
 In Tab 04 (`Grounded Deliverable`), the frontend loops through `workspace.deliverables` and renders individual cards:
 
@@ -351,7 +370,7 @@ In Tab 04 (`Grounded Deliverable`), the frontend loops through `workspace.delive
 
 ---
 
-### 4.3 How the Deliverable is Exported / Downloaded
+### 4.4 How the Deliverable Is Exported / Downloaded
 
 Exporting doesn't require a server roundtrip; it is compiled dynamically in the browser from the verified deliverable sections via Vue's `computed` property in [`AppView.vue`](file:///Users/obaidaccount/Project/SuperDocs-Engineering/frontend/src/views/AppView.vue#L151-L192):
 
@@ -405,7 +424,7 @@ function downloadReport() {
 
 ---
 
-### 4.4 Example Downloaded Report (`.md` File)
+### 4.5 Example Downloaded Report (`.md` File)
 
 When the user clicks **"Download Report (.md)"**, a standalone markdown file (`Reconciliation_Report_thread_xxx.md`) is downloaded:
 
@@ -440,11 +459,12 @@ Invoices shall be payable within Net 30 days of receipt. Late fees of 1.0% per m
 
 | Path | Purpose |
 | :--- | :--- |
-| [`bakcend/src/models/db_models.py`](file:///Users/obaidaccount/Project/SuperDocs-Engineering/bakcend/src/models/db_models.py) | SQLAlchemy Declarative models (`Organization`, `Project`, `Document`, `DocumentChunk`, `ReviewItem`, `DeliverableSection`). |
+| [`bakcend/src/models/db_models.py`](file:///Users/obaidaccount/Project/SuperDocs-Engineering/bakcend/src/models/db_models.py) | SQLAlchemy Declarative models (`Organization`, `Project`, `Document`, `DocumentChunk`, `ReviewItem`, `DeliverableSection`, `ComplianceAudit`). |
 | [`bakcend/src/ingestion/pipeline.py`](file:///Users/obaidaccount/Project/SuperDocs-Engineering/bakcend/src/ingestion/pipeline.py) | Background ingestion dispatcher coordinating partitioning, AI vision summarization, batch embeddings, and chunk persistence. |
 | [`bakcend/src/ingestion/partitioner.py`](file:///Users/obaidaccount/Project/SuperDocs-Engineering/bakcend/src/ingestion/partitioner.py) | Unstructured Transform Serverless API integration and title-based chunking (`chunk_by_title`). |
 | [`bakcend/src/ingestion/summarizer.py`](file:///Users/obaidaccount/Project/SuperDocs-Engineering/bakcend/src/ingestion/summarizer.py) | Mixed-content handler; sends tables and images to `gpt-4o-mini` to generate searchable text summaries. |
-| [`bakcend/src/reconciliation/graph.py`](file:///Users/obaidaccount/Project/SuperDocs-Engineering/bakcend/src/reconciliation/graph.py) | LangGraph `StateGraph` defining the 4-node execution workflow (`ingest_documents` $\to$ `build_clusters` $\to$ `llm_judge` $\to$ `persist_results`). |
+| [`bakcend/src/reconciliation/graph.py`](file:///Users/obaidaccount/Project/SuperDocs-Engineering/bakcend/src/reconciliation/graph.py) | LangGraph workflow (`ingest_documents` $\to$ `build_clusters` $\to$ `llm_judge` $\to$ `persist_results` $\to$ `compliance_check`). |
+| [`bakcend/src/reconciliation/compliance.py`](bakcend/src/reconciliation/compliance.py) | Verifies citation coverage and verbatim source quotes, compares final claims with cited pages, and persists the per-run audit. |
 | [`bakcend/src/reconciliation/clusterer.py`](file:///Users/obaidaccount/Project/SuperDocs-Engineering/bakcend/src/reconciliation/clusterer.py) | Topic Anchor discovery, semantic outline extraction, and `pgvector` chunk matching with context window expansion. |
 | [`bakcend/src/reconciliation/judge.py`](file:///Users/obaidaccount/Project/SuperDocs-Engineering/bakcend/src/reconciliation/judge.py) | Structured LLM Judge evaluating topic clusters for `CONFLICT` vs `AGREEMENT`, extracting verbatim quotes and page references. |
 | [`bakcend/src/controller/reconciliation_controller.py`](file:///Users/obaidaccount/Project/SuperDocs-Engineering/bakcend/src/controller/reconciliation_controller.py) | Endpoints controller for running reconciliation, fetching review items, and committing human resolution decisions into deliverables. |
@@ -457,4 +477,4 @@ Invoices shall be payable within Net 30 days of receipt. Late fees of 1.0% per m
 - **Idempotency**: Reconciliation runs use unique `thread_id`s. Running reconciliation on the same `thread_id` deletes previous `review_items` and `deliverable_sections` before regenerating results to avoid duplicate rows.
 - **Deduplication**: Files are SHA-256 hashed prior to upload. If a duplicate file hash is uploaded to a project, it reuses the existing `documents` record without reprocessing.
 - **Grounding Requirement**: All deliverable sections store citations in JSON format (`[{"doc_id": int, "page_number": int, "exact_quote": str}]`). Grounding guarantees that every committed statement references a verified quote and page number in the source corpus.
-
+- **Compliance Gate**: A run cannot be marked compliant while conflict review is pending or when claims are unsupported by their cited source text.

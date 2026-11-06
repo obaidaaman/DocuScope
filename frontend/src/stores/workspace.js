@@ -18,11 +18,14 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const reconciliationResult = ref(null)
   const reviewItems = ref([])
   const deliverables = ref([])
+  const complianceAudit = ref(null)
 
   // Loading flags
   const isPreviewing = ref(false)
   const isReconciling = ref(false)
   const isResolving = ref(false)
+  const isCheckingCompliance = ref(false)
+  const isFinalizingDeliverable = ref(false)
   const isUploading = ref(false)
   const actionError = ref('')
 
@@ -35,6 +38,12 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const currentDocs = computed(() => currentProject.value?.documents || [])
   const parsedDocs = computed(() => currentDocs.value.filter(d => d.status === 'PARSED'))
   const pendingReviewCount = computed(() => reviewItems.value.filter(i => i.status === 'PENDING').length)
+  const pendingConflictCount = computed(() => reviewItems.value.filter(
+    i => i.status === 'PENDING' && i.item_type === 'CONFLICT'
+  ).length)
+  const pendingComplianceCount = computed(() => reviewItems.value.filter(
+    i => i.status === 'PENDING' && i.item_type === 'COMPLIANCE'
+  ).length)
 
   // 1. Projects
   async function fetchProjects() {
@@ -178,6 +187,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
         max_pairs: Number(maxPairs.value),
         thread_id: thread
       }
+      complianceAudit.value = null
       const { data } = await api.post('/reconciliation/reconcile', payload)
       reconciliationResult.value = data
       activeThreadId.value = data.thread_id
@@ -216,6 +226,51 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     }
   }
 
+  async function startComplianceCheck(sourceTruthDocId) {
+    if (!activeThreadId.value) return
+    isCheckingCompliance.value = true
+    actionError.value = ''
+    try {
+      const { data } = await api.post(
+        `/reconciliation/${activeThreadId.value}/compliance`,
+        {
+          source_truth_doc_id: Number(sourceTruthDocId),
+          project_id: Number(currentProjectId.value)
+        }
+      )
+      complianceAudit.value = data
+      await fetchReviewItems(activeThreadId.value)
+      return data
+    } catch (err) {
+      actionError.value = errorMessage(err)
+      throw new Error(errorMessage(err))
+    } finally {
+      isCheckingCompliance.value = false
+    }
+  }
+
+  async function finalizeDeliverable() {
+    if (!activeThreadId.value) return
+    isFinalizingDeliverable.value = true
+    actionError.value = ''
+    try {
+      const { data } = await api.post(
+        `/reconciliation/${activeThreadId.value}/finalize`
+      )
+      complianceAudit.value = {
+        ...complianceAudit.value,
+        ...data,
+        finalized: data.finalized,
+      }
+      return data
+    } catch (err) {
+      actionError.value = errorMessage(err)
+      throw new Error(errorMessage(err))
+    } finally {
+      isFinalizingDeliverable.value = false
+    }
+  }
+
   async function resolveConflict(reviewItemId, action, chosenDocId = null, customText = null) {
     if (!activeThreadId.value) return
     isResolving.value = true
@@ -232,10 +287,14 @@ export const useWorkspaceStore = defineStore('workspace', () => {
           }
         ]
       }
-      await api.post('/reconciliation/resolve-gate', payload)
+      const { data } = await api.post('/reconciliation/resolve-gate', payload)
       // re-sync review items and deliverables
       await fetchReviewItems(activeThreadId.value)
       await fetchDeliverables(activeThreadId.value)
+      if (data.compliance_audit) {
+        complianceAudit.value = data.compliance_audit
+      }
+      return data
     } catch (err) {
       actionError.value = errorMessage(err)
       throw new Error(errorMessage(err))
@@ -331,8 +390,22 @@ export const useWorkspaceStore = defineStore('workspace', () => {
               total_dabbe: data.verdicts?.length || 0
             }
             livePipelineActive.value = false
-            liveStatusMessage.value = `Pipeline complete: ${data.conflicts_count} conflicts awaiting review.`
-            if (onStageAdvance) onStageAdvance('review')
+            liveStatusMessage.value = data.conflicts_count
+              ? `Pipeline complete: ${data.conflicts_count} conflicts awaiting review.`
+              : 'Pipeline complete: draft deliverable is ready.'
+            fetchReviewItems(data.thread_id)
+            fetchDeliverables(data.thread_id)
+            if (onStageAdvance) {
+              onStageAdvance(data.conflicts_count > 0 ? 'review' : 'deliverable')
+            }
+          } else if (evt === 'COMPLIANCE_CHECK_COMPLETE') {
+            complianceAudit.value = data
+            fetchReviewItems(data.thread_id)
+            livePipelineActive.value = false
+            liveStatusMessage.value = `Compliance check: ${data.status}.`
+            if (data.status !== 'PENDING_REVIEW' && onStageAdvance) {
+              onStageAdvance('compliance')
+            }
           } else if (evt === 'PIPELINE_ERROR') {
             if (activeSyncPoll) {
               clearInterval(activeSyncPoll)
@@ -377,6 +450,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       const { data } = await api.post('/reconciliation/start-live-pipeline', formData)
       activeThreadId.value = data.thread_id
       selectedDocIds.value = data.doc_ids || []
+      complianceAudit.value = null
 
       connectWebSocket(data.thread_id, onStageAdvance)
       startReconciliationSyncPolling(data.thread_id, onStageAdvance)
@@ -405,6 +479,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       }
       const { data } = await api.post('/reconciliation/start-live-from-docs', payload)
       activeThreadId.value = data.thread_id
+      complianceAudit.value = null
 
       connectWebSocket(data.thread_id, onStageAdvance)
       startReconciliationSyncPolling(data.thread_id, onStageAdvance)
@@ -430,13 +505,18 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     reconciliationResult,
     reviewItems,
     deliverables,
+    complianceAudit,
     pendingReviewCount,
+    pendingConflictCount,
+    pendingComplianceCount,
     loadingProjects,
     loadingDocs,
     isUploading,
     isPreviewing,
     isReconciling,
     isResolving,
+    isCheckingCompliance,
+    isFinalizingDeliverable,
     actionError,
     fetchProjects,
     createProject,
@@ -449,6 +529,8 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     runReconciliation,
     fetchReviewItems,
     fetchDeliverables,
+    startComplianceCheck,
+    finalizeDeliverable,
     resolveConflict,
     // Real-Time Live WebSocket Pipeline
     livePipelineActive,

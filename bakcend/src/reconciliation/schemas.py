@@ -52,10 +52,14 @@ class ReconciliationResponse(BaseModel):
 
 class ResolutionAction(BaseModel):
     review_item_id: int
-    action: Literal["APPROVE_DOC", "CUSTOM_RESOLUTION", "REJECT"]
+    action: Literal["APPROVE_DOC", "APPROVE_AS_IS", "CUSTOM_RESOLUTION", "REJECT"]
     chosen_doc_id: Optional[int] = None
     custom_text: Optional[str] = None
 
 class ResolveReviewItemsRequest(BaseModel):
     thread_id: str
     resolutions: List[ResolutionAction]
+
+class ComplianceCheckRequest(BaseModel):
+    source_truth_doc_id: int = Field(..., gt=0)
+    project_id: int = Field(..., gt=0)

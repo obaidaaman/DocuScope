@@ -21,6 +21,10 @@ const inspectedDocName = ref('')
 const showCustomModal = ref(false)
 const selectedReviewItem = ref(null)
 const reportCopied = ref(false)
+const sourceTruthDocId = ref('')
+const selectedSourceTruthDocument = computed(() =>
+  workspace.currentDocs.find(doc => String(doc.id) === sourceTruthDocId.value)
+)
 
 // Auto polling interval for in-flight documents
 let pollTimer = null
@@ -41,6 +45,15 @@ watch(activeTab, async (newTab) => {
     await workspace.fetchDeliverables(workspace.activeThreadId)
   }
 })
+
+watch(
+  () => workspace.complianceAudit,
+  (audit) => {
+    sourceTruthDocId.value = audit?.source_truth_doc_id
+      ? String(audit.source_truth_doc_id)
+      : ''
+  }
+)
 
 function startPolling() {
   if (pollTimer) clearInterval(pollTimer)
@@ -125,6 +138,7 @@ async function onRunReconciliation() {
 async function resolveAdoptDoc(item, docId) {
   try {
     await workspace.resolveConflict(item.id, 'APPROVE_DOC', docId)
+    returnToDeliverableWhenReviewsComplete()
   } catch {
     // handled
   }
@@ -133,9 +147,47 @@ async function resolveAdoptDoc(item, docId) {
 async function resolveReject(item) {
   try {
     await workspace.resolveConflict(item.id, 'REJECT')
+    returnToDeliverableWhenReviewsComplete()
   } catch {
     // handled
   }
+}
+
+async function resolveCompliance(item, action) {
+  try {
+    await workspace.resolveConflict(item.id, action)
+    returnToDeliverableWhenReviewsComplete()
+  } catch {
+    // handled in store
+  }
+}
+
+async function finalizeUltimateDeliverable() {
+  try {
+    await workspace.finalizeDeliverable()
+  } catch {
+    // handled in store
+  }
+}
+
+async function startSourceTruthComparison() {
+  if (!sourceTruthDocId.value) return
+  try {
+    const result = await workspace.startComplianceCheck(sourceTruthDocId.value)
+    if (result.pending_compliance_reviews > 0) activeTab.value = 'review'
+  } catch {
+    // handled in store
+  }
+}
+
+async function onSourceTruthDocumentSelected() {
+  if (selectedSourceTruthDocument.value?.status === 'FAILED') {
+    await workspace.retryDocument(selectedSourceTruthDocument.value.id)
+  }
+}
+
+function returnToDeliverableWhenReviewsComplete() {
+  if (workspace.pendingReviewCount === 0) activeTab.value = 'deliverable'
 }
 
 function openCustomResolution(item) {
@@ -145,17 +197,30 @@ function openCustomResolution(item) {
 
 async function handleCustomResolution({ reviewItemId, action, customText }) {
   await workspace.resolveConflict(reviewItemId, action, null, customText)
+  returnToDeliverableWhenReviewsComplete()
 }
 
 // 5. Deliverables & Full Report Export
 const compiledReportMarkdown = computed(() => {
   if (!workspace.deliverables.length) return ''
   const lines = []
-  lines.push(`# SuperDocs Reconciled Deliverable Report`)
+  lines.push(
+    workspace.complianceAudit?.finalized
+      ? '# SuperDocs Ultimate Final Deliverable'
+      : '# SuperDocs Reconciled Deliverable Draft'
+  )
   lines.push(`**Run Thread ID:** \`${workspace.activeThreadId || 'N/A'}\``)
   lines.push(`**Project:** ${workspace.currentProject?.name || 'Untitled'}`)
   lines.push(`**Generated:** ${new Date().toLocaleString()}`)
   lines.push(`---\n`)
+
+  if (workspace.complianceAudit?.finalized) {
+    lines.push(`## Compliance Review Sign-off\n`)
+    lines.push(`**Status:** ${workspace.complianceAudit.status}`)
+    lines.push(`**Source of Truth:** ${workspace.complianceAudit.source_of_truth}`)
+    lines.push(`**Sections Checked:** ${workspace.complianceAudit.checked_sections}`)
+    lines.push(`\n`)
+  }
 
   lines.push(`## Reconciled Contractual Terms\n`)
   for (const s of workspace.deliverables) {
@@ -268,7 +333,7 @@ function downloadReport() {
           @click="activeTab = 'review'"
         >
           <span class="stage-num">03</span>
-          <span class="stage-label">Conflict Review Gate</span>
+          <span class="stage-label">Human Review Gate</span>
           <span class="badge alert" v-if="workspace.pendingReviewCount > 0">
             {{ workspace.pendingReviewCount }} Pending
           </span>
@@ -283,6 +348,7 @@ function downloadReport() {
           <span class="stage-label">Grounded Deliverable</span>
           <span class="badge" v-if="workspace.deliverables.length">{{ workspace.deliverables.length }} Clauses</span>
         </button>
+
       </nav>
 
       <!-- Live WebSocket Pipeline Streaming Ribbon -->
@@ -463,9 +529,9 @@ function downloadReport() {
         <div class="content-header">
           <div>
             <span class="label faint">Pipeline Stage 03</span>
-            <h2>Human-in-the-Loop Conflict Review Gate</h2>
+            <h2>Human-in-the-Loop Review Gate</h2>
             <p class="soft">
-              Every identified conflict requires an analyst decision. Adopt a specific document's clause, reject the claim, or write a custom contractual resolution.
+              Review source conflicts and compliance findings. Approve a cited source, accept a section as-is, rewrite it, or reject it.
             </p>
           </div>
         </div>
@@ -524,32 +590,54 @@ function downloadReport() {
               <div v-if="item.status === 'PENDING'" class="actions-group">
                 <span class="label faint">Analyst Decision:</span>
                 <div class="buttons-row">
-                  <!-- Quick adopt buttons for each cited doc -->
-                  <button
-                    v-for="cit in item.citations"
-                    :key="'adopt-' + cit.doc_id"
-                    class="btn btn-outline sm"
-                    :disabled="workspace.isResolving"
-                    @click="resolveAdoptDoc(item, cit.doc_id)"
-                  >
-                    Adopt Doc {{ cit.doc_id }} Terms
-                  </button>
-
-                  <button
-                    class="btn btn-outline sm"
-                    :disabled="workspace.isResolving"
-                    @click="openCustomResolution(item)"
-                  >
-                    Custom Resolution…
-                  </button>
-
-                  <button
-                    class="btn btn-outline sm alert"
-                    :disabled="workspace.isResolving"
-                    @click="resolveReject(item)"
-                  >
-                    Reject Claim
-                  </button>
+                  <template v-if="item.item_type === 'COMPLIANCE'">
+                    <button
+                      class="btn btn-outline sm"
+                      :disabled="workspace.isResolving"
+                      @click="resolveCompliance(item, 'APPROVE_AS_IS')"
+                    >
+                      Approve Section As-Is
+                    </button>
+                    <button
+                      class="btn btn-outline sm"
+                      :disabled="workspace.isResolving"
+                      @click="openCustomResolution(item)"
+                    >
+                      Rewrite Section…
+                    </button>
+                    <button
+                      class="btn btn-outline sm alert"
+                      :disabled="workspace.isResolving"
+                      @click="resolveReject(item)"
+                    >
+                      Reject Section
+                    </button>
+                  </template>
+                  <template v-else>
+                    <button
+                      v-for="cit in item.citations"
+                      :key="'adopt-' + cit.doc_id"
+                      class="btn btn-outline sm"
+                      :disabled="workspace.isResolving"
+                      @click="resolveAdoptDoc(item, cit.doc_id)"
+                    >
+                      Adopt Doc {{ cit.doc_id }} Terms
+                    </button>
+                    <button
+                      class="btn btn-outline sm"
+                      :disabled="workspace.isResolving"
+                      @click="openCustomResolution(item)"
+                    >
+                      Custom Resolution…
+                    </button>
+                    <button
+                      class="btn btn-outline sm alert"
+                      :disabled="workspace.isResolving"
+                      @click="resolveReject(item)"
+                    >
+                      Reject Claim
+                    </button>
+                  </template>
                 </div>
               </div>
 
@@ -568,16 +656,17 @@ function downloadReport() {
         <div class="content-header deliverable-header">
           <div>
             <span class="label faint">Pipeline Stage 04</span>
-            <h2>Grounded Deliverable & Reconciliation Register</h2>
+            <h2>{{ workspace.complianceAudit?.finalized ? 'Ultimate Final Deliverable' : 'Deliverable Draft' }}</h2>
             <p class="soft">
-              Synthesized legal report combining direct agreements and resolved human decisions. Every statement is traceable to its verified citation.
+              Synthesized report combining source agreements and human-reviewed decisions.
+              {{ workspace.complianceAudit?.finalized ? 'This version passed the compliance review gate and is finalized.' : 'Complete compliance review and finalize before exporting the ultimate deliverable.' }}
             </p>
           </div>
           <div class="deliverable-actions">
-            <button class="btn btn-outline sm" @click="copyReport">
+            <button class="btn btn-outline sm" :disabled="!workspace.complianceAudit?.finalized" @click="copyReport">
               {{ reportCopied ? '✓ Copied Markdown' : 'Copy Report MD' }}
             </button>
-            <button class="btn btn-ink sm" @click="downloadReport">
+            <button class="btn btn-ink sm" :disabled="!workspace.complianceAudit?.finalized" @click="downloadReport">
               Download Report (.md)
             </button>
           </div>
@@ -617,6 +706,150 @@ function downloadReport() {
               </div>
             </div>
           </article>
+        </div>
+
+        <div v-if="workspace.deliverables.length" class="source-truth-selector frame">
+          <div>
+            <span class="label faint">Next: Source-of-Truth Review</span>
+            <h3>Select the authoritative document</h3>
+            <p class="soft">
+              Compare this draft with one parsed project document. Any differences return to the Human Review Gate before finalization.
+            </p>
+          </div>
+          <div class="field">
+            <label for="source-truth-document">Source of truth</label>
+            <select
+              id="source-truth-document"
+              v-model="sourceTruthDocId"
+              class="input"
+              :disabled="workspace.isCheckingCompliance || workspace.pendingReviewCount > 0"
+              @change="onSourceTruthDocumentSelected"
+            >
+              <option value="" disabled>Select a project document</option>
+              <option v-for="doc in workspace.currentDocs" :key="doc.id" :value="String(doc.id)">
+                {{ doc.filename }} ({{ doc.status }})
+              </option>
+            </select>
+          </div>
+          <p
+            v-if="selectedSourceTruthDocument && selectedSourceTruthDocument.status !== 'PARSED'"
+            class="warning-text"
+          >
+            {{
+              selectedSourceTruthDocument.status === 'FAILED'
+                ? 'Parsing failed. A retry has been queued; comparison will be available when parsing succeeds.'
+                : `This document is ${selectedSourceTruthDocument.status.toLowerCase()}. It must finish parsing before comparison.`
+            }}
+          </p>
+          <p v-else-if="selectedSourceTruthDocument" class="success-text">
+            Source document is parsed and ready to compare.
+          </p>
+          <p v-if="workspace.pendingReviewCount" class="warning-text">
+            Resolve all {{ workspace.pendingReviewCount }} pending review item(s) before starting or changing the source-of-truth comparison.
+          </p>
+          <button
+            class="btn btn-ink"
+            :disabled="
+              selectedSourceTruthDocument?.status !== 'PARSED'
+              || workspace.pendingReviewCount > 0
+              || workspace.isCheckingCompliance
+            "
+            @click="startSourceTruthComparison"
+          >
+            {{ workspace.isCheckingCompliance ? 'Comparing Deliverable…' : 'Compare Deliverable' }}
+          </button>
+        </div>
+
+        <div v-if="workspace.complianceAudit && workspace.complianceAudit.status !== 'NOT_RUN'" class="compliance-audit frame">
+          <div class="compliance-summary">
+            <div>
+              <span class="label faint">Audit Status</span>
+              <h3>{{ workspace.complianceAudit.status }}</h3>
+            </div>
+            <div>
+              <span class="label faint">Source of Truth</span>
+              <p>{{ workspace.complianceAudit.source_of_truth }}</p>
+            </div>
+            <div>
+              <span class="label faint">Sections Checked</span>
+              <p>{{ workspace.complianceAudit.checked_sections ?? 0 }}</p>
+            </div>
+            <div v-if="workspace.complianceAudit.pending_conflicts">
+              <span class="label faint">Pending Conflicts</span>
+              <p>{{ workspace.complianceAudit.pending_conflicts }}</p>
+            </div>
+          </div>
+
+          <div v-if="workspace.complianceAudit.status === 'PENDING_REVIEW'" class="warning-text">
+            Resolve all conflicts before the deliverable can receive a final compliance status.
+          </div>
+          <div v-else-if="workspace.complianceAudit.status === 'NOT_READY'" class="warning-text">
+            There are no committed sections to check yet.
+          </div>
+          <div
+            v-if="workspace.complianceAudit.pending_compliance_reviews"
+            class="warning-text"
+          >
+            {{ workspace.complianceAudit.pending_compliance_reviews }} compliance finding(s) need analyst review before finalization.
+            <button class="btn-link" @click="activeTab = 'review'">Open Human Review Gate</button>
+          </div>
+
+          <article
+            v-for="check in workspace.complianceAudit.checks"
+            :key="check.rule_id"
+            class="compliance-rule"
+          >
+            <div class="compliance-rule-header">
+              <h3>{{ check.requirement }}</h3>
+              <span :class="['compliance-result', check.status.toLowerCase()]">{{ check.status }}</span>
+            </div>
+            <ul v-if="check.findings.length">
+              <li v-for="(finding, index) in check.findings" :key="index">
+                <strong>{{ finding.section }}</strong>
+                <span v-if="finding.doc_id"> — Doc {{ finding.doc_id }}, page {{ finding.page_number }}:</span>
+                {{ finding.message || finding.explanation }}
+                <ul v-if="finding.unsupported_claims?.length">
+                  <li v-for="(claim, claimIndex) in finding.unsupported_claims" :key="claimIndex">
+                    {{ claim }}
+                  </li>
+                </ul>
+              </li>
+            </ul>
+            <p
+              v-if="!check.findings.length && !check.section_results?.length"
+              class="success-text"
+            >
+              No findings.
+            </p>
+            <ul v-if="check.section_results?.length">
+              <li v-for="(result, index) in check.section_results" :key="index">
+                <strong>{{ result.section }}</strong> — {{ result.status }}:
+                {{ result.explanation }}
+                <ul v-if="result.unsupported_claims.length">
+                  <li v-for="(claim, claimIndex) in result.unsupported_claims" :key="claimIndex">
+                    {{ claim }}
+                  </li>
+                </ul>
+              </li>
+            </ul>
+          </article>
+          <div class="finalize-deliverable">
+            <p v-if="workspace.complianceAudit.finalized" class="success-text">
+              Ultimate final deliverable is finalized and ready to export.
+            </p>
+            <button
+              v-else-if="['COMPLIANT', 'HUMAN_APPROVED'].includes(workspace.complianceAudit.status)"
+              class="btn btn-ink"
+              :disabled="
+                workspace.isFinalizingDeliverable
+                || workspace.pendingReviewCount > 0
+                || !['COMPLIANT', 'HUMAN_APPROVED'].includes(workspace.complianceAudit.status)
+              "
+              @click="finalizeUltimateDeliverable"
+            >
+              {{ workspace.isFinalizingDeliverable ? 'Finalizing…' : 'Finalize Ultimate Deliverable' }}
+            </button>
+          </div>
         </div>
       </section>
     </main>
@@ -765,7 +998,7 @@ function downloadReport() {
   background: var(--paper-deep);
   border-bottom: 1px solid var(--hairline);
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   padding: 0 clamp(20px, 3vw, 40px);
 }
 
@@ -1358,6 +1591,100 @@ th {
   display: flex;
   flex-direction: column;
   gap: 16px;
+}
+
+.compliance-audit {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding: 24px;
+}
+
+.source-truth-selector {
+  align-items: flex-end;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  justify-content: space-between;
+  margin-bottom: 20px;
+  padding: 20px;
+}
+
+.source-truth-selector .field {
+  flex: 1;
+  min-width: 260px;
+}
+
+.compliance-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 24px;
+  justify-content: space-between;
+}
+
+.compliance-summary h3,
+.compliance-summary p {
+  margin-top: 6px;
+}
+
+.compliance-rule {
+  border-top: 1px solid var(--hairline);
+  padding-top: 18px;
+}
+
+.finalize-deliverable {
+  border-top: 1px solid var(--hairline);
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 18px;
+}
+
+.compliance-rule-header {
+  align-items: flex-start;
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+}
+
+.compliance-rule-header h3 {
+  font-size: 1rem;
+  font-weight: 500;
+}
+
+.compliance-rule ul {
+  margin-top: 12px;
+  padding-left: 20px;
+}
+
+.compliance-rule li {
+  margin-top: 8px;
+}
+
+.compliance-result {
+  border-radius: 2px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 4px 8px;
+}
+
+.compliance-result.pass {
+  background: rgba(77, 107, 58, 0.12);
+  color: #4D6B3A;
+}
+
+.compliance-result.fail {
+  background: rgba(153, 66, 49, 0.12);
+  color: #994231;
+}
+
+.compliance-result.needs_review {
+  background: rgba(194, 164, 92, 0.18);
+  color: #80651F;
+}
+
+.compliance-result.not_applicable {
+  background: rgba(26, 25, 23, 0.08);
+  color: var(--ink-soft);
 }
 
 .deliv-head {
