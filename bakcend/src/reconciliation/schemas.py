@@ -1,5 +1,17 @@
-from typing import List, Optional, Literal, Dict, Any
+from typing import List, Optional, Literal, Dict, Any, TypedDict
 from pydantic import BaseModel, Field
+
+class ReconciliationState(TypedDict):
+    thread_id: Optional[str]
+    doc_ids: List[int]
+    doc_paths: Optional[List[Dict[str, Any]]]
+    similarity_threshold: float
+    max_pairs: int
+    doc_extractions: Optional[List[Dict[str, Any]]]
+    clusters: List[Dict[str, Any]]
+    verdicts: List[Dict[str, Any]]
+    review_items: Optional[List[Dict[str, Any]]]
+    error: Optional[str]
 
 class EvidenceItem(BaseModel):
     doc_id: int = Field(description="Document ID from which quote is cited")
@@ -15,26 +27,61 @@ class JudgeVerdict(BaseModel):
     explanation: str = Field(description="Clear explanation detailing how documents disagree or agree")
     evidence: List[EvidenceItem] = Field(description="List of verbatim evidence quotes with document ID and page number")
 
+
+class ClusterVerdictList(BaseModel):
+    verdicts: List[JudgeVerdict] = Field(
+        description="All distinct conflict or agreement verdicts found within this topic cluster"
+    )
+
 class Passage(BaseModel):
     doc_id: int
+    filename: Optional[str] = None
+    doc_type: Optional[str] = None
+    execution_status: Optional[str] = None
     chunk_index: int
     page_number: int
+    extracted_claim: Optional[str] = None
     text: str
 
 class TopicCluster(BaseModel):
     dabba_id: int
     topic_hint: Optional[str] = None
+    governance_context: Optional[str] = None
     document_ids: List[int]
     passages: List[Passage]
     total_chunks: int
 
-class TopicAnchor(BaseModel):
-    topic_name: str = Field(description="Concise topic title, e.g. 'Hourly Billing Rates & Caps'")
-    description: str = Field(description="Brief explanation of what is being cross-reconciled")
-    search_query: str = Field(description="Dense semantic search phrase containing key terms and figures to retrieve chunks via vector search")
+class SectionClaim(BaseModel):
+    chunk_index: int
+    section_title: str
+    claim: str
 
-class DiscoveredTopics(BaseModel):
-    topics: List[TopicAnchor] = Field(description="List of 3 to 6 key comparative topics across the documents")
+class DocumentExtraction(BaseModel):
+    doc_id: int
+    filename: str
+    doc_type: str
+    execution_status: str
+    governance_summary: Optional[str] = None
+    claims: List[SectionClaim]
+
+class ClusterMatch(BaseModel):
+    doc_id: int
+    chunk_index: int
+
+class AlignedTopic(BaseModel):
+    topic_name: str
+    matched_chunks: List[ClusterMatch]
+
+class AlignedTopicList(BaseModel):
+    topics: List[AlignedTopic]
+
+# class TopicAnchor(BaseModel):
+#     topic_name: str = Field(description="Concise topic title, e.g. 'Hourly Billing Rates & Caps'")
+#     description: str = Field(description="Brief explanation of what is being cross-reconciled")
+#     search_query: str = Field(description="Dense semantic search phrase containing key terms and figures to retrieve chunks via vector search")
+#
+# class DiscoveredTopics(BaseModel):
+#     topics: List[TopicAnchor] = Field(description="List of 3 to 6 key comparative topics across the documents")
 
 class ReconciliationRequest(BaseModel):
     doc_ids: List[int] = Field(..., min_length=2, description="At least 2 document IDs to reconcile")

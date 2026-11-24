@@ -3,9 +3,9 @@
     <aside class="art">
       <RouterLink to="/" class="brand" aria-label="SuperDocs home">
         <svg width="26" height="26" viewBox="0 0 26 26" fill="none" aria-hidden="true">
-          <rect x="3" y="2" width="14" height="18" rx="1.5" stroke="#F0EBE1" stroke-width="1.5"/>
-          <rect x="9" y="6" width="14" height="18" rx="1.5" fill="#14130F" stroke="#C2A45C" stroke-width="1.5"/>
-          <path d="M12.5 12h7M12.5 15.5h7M12.5 19h4" stroke="#F0EBE1" stroke-width="1.3" stroke-linecap="round"/>
+          <rect x="3" y="2" width="14" height="18" rx="2" stroke="#FAFAFA" stroke-width="1.5"/>
+          <rect x="9" y="6" width="14" height="18" rx="2" fill="#09090B" stroke="#FFFFFF" stroke-width="1.5"/>
+          <path d="M12.5 12h7M12.5 15.5h7M12.5 19h4" stroke="#FAFAFA" stroke-width="1.3" stroke-linecap="round"/>
         </svg>
         <span>SuperDocs</span>
       </RouterLink>
@@ -35,11 +35,11 @@
 <style scoped>
 .auth { display: grid; grid-template-columns: minmax(380px, 1fr) minmax(420px, 1fr); min-height: 100vh; }
 
-.art { background: linear-gradient(170deg, #14130F 0%, #1E1D16 50%, #2E2D24 100%); color: var(--cream); padding: 32px clamp(28px, 4vw, 56px); display: flex; flex-direction: column; justify-content: space-between; position: relative; overflow: hidden; }
+.art { background: linear-gradient(170deg, #09090B 0%, #141417 55%, #09090B 100%); color: var(--cream); padding: 32px clamp(28px, 4vw, 56px); display: flex; flex-direction: column; justify-content: space-between; position: relative; overflow: hidden; }
 .brand { display: inline-flex; align-items: center; gap: 9px; font-size: 18px; font-weight: 500; letter-spacing: -0.01em; }
 .art-body { display: grid; gap: 18px; }
-.art h2 { font-size: clamp(2rem, 3.4vw, 3rem); font-weight: 500; letter-spacing: -0.03em; line-height: 1.08; max-width: 420px; }
-.gold { color: var(--gold); }
+.art h2 { font-family: var(--font-serif); font-size: clamp(2rem, 3.4vw, 3rem); font-weight: 500; letter-spacing: -0.03em; line-height: 1.08; max-width: 420px; }
+.gold { color: #A1A1AA; }
 .art small { color: var(--cream-soft); }
 
 .planes { position: relative; height: 230px; margin-top: 18px; max-width: 380px; }

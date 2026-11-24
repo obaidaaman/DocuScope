@@ -491,6 +491,31 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     }
   }
 
+  function resetState() {
+    if (activeSyncPoll) {
+      clearInterval(activeSyncPoll)
+      activeSyncPoll = null
+    }
+    if (activeSocket) {
+      try { activeSocket.close() } catch {}
+      activeSocket = null
+    }
+    projects.value = []
+    currentProjectId.value = null
+    currentProject.value = null
+    selectedDocIds.value = []
+    activeThreadId.value = ''
+    clustersPreview.value = null
+    reconciliationResult.value = null
+    reviewItems.value = []
+    deliverables.value = []
+    complianceAudit.value = null
+    livePipelineActive.value = false
+    liveStatusStage.value = ''
+    liveStatusMessage.value = ''
+    actionError.value = ''
+  }
+
   return {
     projects,
     currentProjectId,
@@ -538,6 +563,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     liveStatusMessage,
     connectWebSocket,
     startLivePipeline,
-    startLiveReconciliation
+    startLiveReconciliation,
+    resetState
   }
 })

@@ -26,6 +26,33 @@ const selectedSourceTruthDocument = computed(() =>
   workspace.currentDocs.find(doc => String(doc.id) === sourceTruthDocId.value)
 )
 
+const isPipelineBusy = computed(() =>
+  workspace.livePipelineActive || workspace.isReconciling || workspace.isPreviewing
+)
+
+const pipelineProgress = computed(() => {
+  if (workspace.isPreviewing) {
+    return { percent: 45, label: 'Extracting atomic claims & aligning topic clusters…', step: 'PREVIEW' }
+  }
+  const st = (workspace.liveStatusStage || '').toUpperCase()
+  if (st.includes('INGEST') || st.includes('UPLOAD')) {
+    return { percent: 18, label: workspace.liveStatusMessage || 'Ingesting & parsing documents…', step: '01 INGEST' }
+  }
+  if (st.includes('EXTRACT')) {
+    return { percent: 42, label: workspace.liveStatusMessage || 'Extracting atomic claims & governance rules…', step: '02 EXTRACT' }
+  }
+  if (st.includes('CLUSTER') || st.includes('ALIGN') || st.includes('DABBA')) {
+    return { percent: 65, label: workspace.liveStatusMessage || 'Building cross-document topic clusters…', step: '03 CLUSTER' }
+  }
+  if (st.includes('JUDGE') || st.includes('VERDICT') || st.includes('EVAL')) {
+    return { percent: 86, label: workspace.liveStatusMessage || 'Evaluating conflicts & verifying citations…', step: '04 JUDGE' }
+  }
+  if (st.includes('PERSIST') || st.includes('COMPLETE') || st.includes('READY')) {
+    return { percent: 98, label: workspace.liveStatusMessage || 'Finalizing reconciliation report…', step: '05 FINALIZE' }
+  }
+  return { percent: 24, label: workspace.liveStatusMessage || 'Starting reconciliation pipeline…', step: 'RUNNING' }
+})
+
 // Auto polling interval for in-flight documents
 let pollTimer = null
 
@@ -71,6 +98,7 @@ function stopPolling() {
 
 async function handleLogout() {
   stopPolling()
+  workspace.resetState()
   await auth.logout()
   router.push('/login')
 }
@@ -258,107 +286,133 @@ function downloadReport() {
 </script>
 
 <template>
-  <div class="workspace">
-    <!-- Top Bar -->
-    <header class="app-nav">
-      <div class="nav-left">
-        <RouterLink to="/" class="brand" aria-label="SuperDocs home">
-          <svg width="24" height="24" viewBox="0 0 26 26" fill="none" aria-hidden="true">
-            <rect x="3" y="2" width="14" height="18" rx="1.5" stroke="#F0EBE1" stroke-width="1.5"/>
-            <rect x="9" y="6" width="14" height="18" rx="1.5" fill="#14130F" stroke="#C2A45C" stroke-width="1.5"/>
-            <path d="M12.5 12h7M12.5 15.5h7M12.5 19h4" stroke="#F0EBE1" stroke-width="1.3" stroke-linecap="round"/>
-          </svg>
-          <span class="brand-title">SuperDocs</span>
-        </RouterLink>
-
-        <!-- Project Selector -->
-        <div class="project-selector">
-          <label for="project-dropdown" class="label gold">Project</label>
-          <select
-            id="project-dropdown"
-            class="project-select"
-            :value="workspace.currentProjectId"
-            @change="onProjectSelect"
-          >
-            <option v-if="!workspace.projects.length" disabled value="">No Projects Created</option>
-            <option v-for="p in workspace.projects" :key="p.id" :value="p.id">
-              {{ p.name }}
-            </option>
-          </select>
-          <button class="btn-new-proj" @click="showNewProjectModal = true" title="Create New Project">
-            + New
+  <div class="studio-shell">
+    <!-- Left Sidebar (Reducto Studio Style) -->
+    <aside class="studio-sidebar">
+      <div class="sidebar-top">
+        <div class="sidebar-brand-row">
+          <RouterLink to="/" class="brand" aria-label="SuperDocs home">
+            <svg width="20" height="20" viewBox="0 0 26 26" fill="none" aria-hidden="true">
+              <rect x="3" y="2" width="14" height="18" rx="2" stroke="#09090B" stroke-width="1.8"/>
+              <rect x="9" y="6" width="14" height="18" rx="2" fill="#FAFAFA" stroke="#09090B" stroke-width="1.8"/>
+              <path d="M12.5 12h7M12.5 15.5h7M12.5 19h4" stroke="#09090B" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+            <span class="brand-title">SuperDocs</span>
+          </RouterLink>
+          <button class="sidebar-icon-btn" @click="showNewProjectModal = true" title="Create New Project">
+            +
           </button>
+        </div>
+
+        <nav class="sidebar-nav" aria-label="Workspace Navigation">
+          <button
+            class="snav-item"
+            :class="{ active: activeTab === 'documents' }"
+            @click="activeTab = 'documents'"
+          >
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path d="M2.5 6.8L8 2.5l5.5 4.3V13.5H10V9.5H6v4H2.5V6.8z" stroke="currentColor" stroke-width="1.35" stroke-linejoin="round"/>
+            </svg>
+            <span>Home</span>
+            <span class="snav-count" v-if="workspace.currentDocs.length">{{ workspace.currentDocs.length }}</span>
+          </button>
+
+          <button
+            class="snav-item"
+            :class="{ active: activeTab === 'reconcile' }"
+            @click="activeTab = 'reconcile'"
+          >
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <circle cx="4.5" cy="4.5" r="2" stroke="currentColor" stroke-width="1.35"/>
+              <circle cx="11.5" cy="4.5" r="2" stroke="currentColor" stroke-width="1.35"/>
+              <circle cx="8" cy="11.5" r="2" stroke="currentColor" stroke-width="1.35"/>
+              <path d="M6.2 5.5l1.2 4.2M9.8 5.5L8.6 9.7" stroke="currentColor" stroke-width="1.2"/>
+            </svg>
+            <span>Reconcile</span>
+            <span class="snav-dot" v-if="isPipelineBusy"></span>
+          </button>
+
+          <button
+            class="snav-item"
+            :class="{ active: activeTab === 'review' }"
+            @click="activeTab = 'review'"
+          >
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path d="M3 4h10M3 8h7M3 12h5" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/>
+              <circle cx="12" cy="11" r="2.2" stroke="currentColor" stroke-width="1.35"/>
+            </svg>
+            <span>Review Gate</span>
+            <span class="snav-badge alert" v-if="workspace.pendingReviewCount > 0">
+              {{ workspace.pendingReviewCount }}
+            </span>
+          </button>
+
+          <button
+            class="snav-item"
+            :class="{ active: activeTab === 'deliverable' }"
+            @click="activeTab = 'deliverable'"
+          >
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <rect x="3" y="2" width="10" height="12" rx="1.5" stroke="currentColor" stroke-width="1.35"/>
+              <path d="M5.5 6h5M5.5 9h5M5.5 11.5h3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+            </svg>
+            <span>Deliverables</span>
+            <span class="snav-count" v-if="workspace.deliverables.length">{{ workspace.deliverables.length }}</span>
+          </button>
+        </nav>
+
+        <!-- Sidebar Projects Quick-Switcher -->
+        <div v-if="workspace.projects.length" class="sidebar-projects">
+          <div class="sidebar-sec-head">
+            <span>Projects</span>
+            <button class="sidebar-add-link" @click="showNewProjectModal = true">+ New</button>
+          </div>
+          <ul class="sidebar-proj-list">
+            <li
+              v-for="p in workspace.projects"
+              :key="p.id"
+              class="sidebar-proj-item"
+              :class="{ active: workspace.currentProjectId === p.id }"
+              @click="workspace.selectProject(p.id)"
+            >
+              <span class="proj-name">{{ p.name }}</span>
+              <span class="proj-cnt">{{ p.documents?.length || 0 }}</span>
+            </li>
+          </ul>
         </div>
       </div>
 
-      <div class="nav-right">
-        <div class="user-pill">
-          <span class="avatar">{{ auth.user?.first_name?.charAt(0) || 'U' }}</span>
+      <!-- Bottom User Profile & Logout -->
+      <div class="sidebar-footer">
+        <div class="sidebar-user">
+          <span class="avatar-sq">{{ auth.user?.first_name?.charAt(0) || 'U' }}</span>
           <div class="user-meta">
             <span class="uname">{{ auth.user?.first_name }} {{ auth.user?.last_name }}</span>
             <span class="uemail">{{ auth.user?.email }}</span>
           </div>
         </div>
-        <button class="btn btn-outline sm" @click="handleLogout">Log out</button>
+        <button class="sidebar-logout" @click="handleLogout" id="app-nav-logout" title="Log out">
+          Log out
+        </button>
       </div>
-    </header>
+    </aside>
 
-    <!-- Main Workspace Container -->
+    <!-- Main Workspace Area -->
     <main class="app-main">
-      <!-- Stage Tabs Navigation -->
-      <nav class="stage-tabs" aria-label="Reconciliation Workflow">
-        <button
-          class="stage-tab"
-          :class="{ active: activeTab === 'documents' }"
-          @click="activeTab = 'documents'"
-        >
-          <span class="stage-num">01</span>
-          <span class="stage-label">Documents & Ingestion</span>
-          <span class="badge">{{ workspace.currentDocs.length }}</span>
-        </button>
-
-        <button
-          class="stage-tab"
-          :class="{ active: activeTab === 'reconcile' }"
-          @click="activeTab = 'reconcile'"
-        >
-          <span class="stage-num">02</span>
-          <span class="stage-label">Topic Clusters & Reconcile</span>
-          <span class="badge" v-if="workspace.parsedDocs.length">{{ workspace.parsedDocs.length }} Ready</span>
-        </button>
-
-        <button
-          class="stage-tab"
-          :class="{ active: activeTab === 'review' }"
-          @click="activeTab = 'review'"
-        >
-          <span class="stage-num">03</span>
-          <span class="stage-label">Human Review Gate</span>
-          <span class="badge alert" v-if="workspace.pendingReviewCount > 0">
-            {{ workspace.pendingReviewCount }} Pending
-          </span>
-        </button>
-
-        <button
-          class="stage-tab"
-          :class="{ active: activeTab === 'deliverable' }"
-          @click="activeTab = 'deliverable'"
-        >
-          <span class="stage-num">04</span>
-          <span class="stage-label">Grounded Deliverable</span>
-          <span class="badge" v-if="workspace.deliverables.length">{{ workspace.deliverables.length }} Clauses</span>
-        </button>
-
-      </nav>
-
-      <!-- Live WebSocket Pipeline Streaming Ribbon -->
-      <div v-if="workspace.livePipelineActive" class="live-stream-ribbon">
-        <div class="stream-pulse"></div>
-        <div class="stream-meta">
-          <span class="stream-tag">LIVE WEBSOCKET STREAM</span>
-          <strong class="stream-stage">NODE: {{ workspace.liveStatusStage || 'EXECUTING' }}</strong>
-          <span class="stream-sep">—</span>
-          <span class="stream-msg">{{ workspace.liveStatusMessage }}</span>
+      <!-- Animated Reconciliation Loading Bar (visible whenever reconciliation / preview runs) -->
+      <div v-if="isPipelineBusy" class="reconcile-loader-card" role="status" aria-live="polite">
+        <div class="loader-top">
+          <div class="loader-left">
+            <span class="loader-pulse"></span>
+            <span class="loader-step-pill">{{ pipelineProgress.step }}</span>
+            <span class="loader-msg">{{ pipelineProgress.label }}</span>
+          </div>
+          <span class="loader-pct">{{ pipelineProgress.percent }}%</span>
+        </div>
+        <div class="loader-track">
+          <div class="loader-fill" :style="{ width: pipelineProgress.percent + '%' }">
+            <div class="loader-shimmer"></div>
+          </div>
         </div>
       </div>
 
@@ -369,19 +423,9 @@ function downloadReport() {
       </div>
 
       <!-- ========================================================================= -->
-      <!-- TAB 1: Documents & Ingestion -->
+      <!-- TAB 1: Home Dashboard (Reducto Studio Style) -->
       <!-- ========================================================================= -->
       <section v-if="activeTab === 'documents'" class="tab-content">
-        <div class="content-header">
-          <div>
-            <span class="label faint">Pipeline Stage 01</span>
-            <h2>Organization, Projects & Documents</h2>
-            <p class="soft">
-              Manage your organization, select a project, and upload PDF documents for reconciliation.
-            </p>
-          </div>
-        </div>
-
         <FileExplorer
           :on-open-chunks="inspectDocById"
           :on-proceed-to-reconcile="(tab) => { activeTab = (tab || 'reconcile') }"
@@ -390,81 +434,53 @@ function downloadReport() {
       </section>
 
       <!-- ========================================================================= -->
-      <!-- TAB 2: Topic Clusters & Reconcile -->
+      <!-- TAB 2: Topic Clusters & Reconcile (Threshold Removed) -->
       <!-- ========================================================================= -->
       <section v-if="activeTab === 'reconcile'" class="tab-content">
         <div class="content-header">
           <div>
-            <span class="label faint">Pipeline Stage 02</span>
-            <h2>Topic Clustering & LLM Judge Reconciliation</h2>
+            <span class="label faint">Stage 02 · Reconciliation</span>
+            <h2>Topic Clusters & Judge</h2>
             <p class="soft">
-              pgvector cross-document vector joins match similar chunks, NetworkX clusters them into topic "Dabbe", and OpenAI evaluates agreements vs conflicts.
+              Extracts atomic claims, aligns cross-document topic clusters, and evaluates every contradiction with grounded page citations.
             </p>
           </div>
         </div>
 
-        <!-- Setup & Parameter Controls -->
+        <!-- Clean Setup & Action Bar (Threshold removed) -->
         <div class="reconcile-controls frame">
-          <div class="control-row">
+          <div class="reconcile-top-bar">
             <div class="doc-selection-summary">
-              <span class="label gold">Selected Documents ({{ workspace.selectedDocIds.length }})</span>
+              <span class="label">Selected Documents ({{ workspace.selectedDocIds.length }})</span>
               <p v-if="workspace.selectedDocIds.length < 2" class="warning-text">
-                ⚠️ Select at least 2 parsed documents to find contradictions.
+                Select at least 2 parsed documents to run reconciliation.
               </p>
               <p v-else class="success-text">
-                ✓ Ready to reconcile across Document IDs: {{ workspace.selectedDocIds.join(', ') }}
+                ✓ Ready across Document IDs: {{ workspace.selectedDocIds.join(', ') }}
               </p>
               <div class="selection-actions">
-                <button class="btn-link" @click="selectAllParsed">Select All Parsed</button>
-                <button class="btn-link" @click="deselectAll">Deselect All</button>
+                <button class="btn-link" @click="selectAllParsed">Select all parsed</button>
+                <button class="btn-link" @click="deselectAll">Deselect all</button>
               </div>
             </div>
 
-            <!-- Parameters -->
-            <div class="params-group">
-              <div class="param-item">
-                <label for="thresh">Similarity Threshold: <b>{{ workspace.similarityThreshold }}</b></label>
-                <input
-                  id="thresh"
-                  type="range"
-                  min="0.30"
-                  max="0.80"
-                  step="0.05"
-                  v-model="workspace.similarityThreshold"
-                />
-              </div>
+            <div class="reconcile-actions">
+              <button
+                class="btn btn-outline"
+                :disabled="workspace.selectedDocIds.length < 2 || workspace.isPreviewing || workspace.livePipelineActive"
+                @click="onPreviewClusters"
+              >
+                {{ workspace.isPreviewing ? 'Aligning Clusters…' : 'Preview Clusters' }}
+              </button>
 
-              <div class="param-item">
-                <label for="max-pairs">Max Graph Pairs: <b>{{ workspace.maxPairs }}</b></label>
-                <input
-                  id="max-pairs"
-                  type="number"
-                  min="50"
-                  max="1000"
-                  step="50"
-                  class="input-sm"
-                  v-model="workspace.maxPairs"
-                />
-              </div>
+              <button
+                class="btn btn-ink"
+                :disabled="workspace.selectedDocIds.length < 2 || workspace.livePipelineActive || workspace.isReconciling"
+                @click="onRunLiveReconciliation"
+              >
+                {{ workspace.livePipelineActive ? 'Reconciling…' : 'Run Reconciliation →' }}
+              </button>
             </div>
-          </div>
-
-          <div class="reconcile-actions">
-            <button
-              class="btn btn-outline"
-              :disabled="workspace.selectedDocIds.length < 2 || workspace.isPreviewing"
-              @click="onPreviewClusters"
-            >
-              {{ workspace.isPreviewing ? 'Extracting Topics & Aligning…' : 'Preview Clusters (Topic Anchors)' }}
-            </button>
-
-            <button
-              class="btn btn-ink"
-              :disabled="workspace.selectedDocIds.length < 2 || workspace.livePipelineActive || workspace.isReconciling"
-              @click="onRunLiveReconciliation"
-            >
-              {{ workspace.livePipelineActive ? 'Streaming Live Pipeline…' : 'Run Live Reconciliation ⚡' }}
-            </button>
           </div>
         </div>
 
@@ -615,13 +631,13 @@ function downloadReport() {
                   </template>
                   <template v-else>
                     <button
-                      v-for="cit in item.citations"
-                      :key="'adopt-' + cit.doc_id"
+                      v-for="docId in [...new Set((item.citations || []).map(c => c.doc_id))]"
+                      :key="'adopt-' + docId"
                       class="btn btn-outline sm"
                       :disabled="workspace.isResolving"
-                      @click="resolveAdoptDoc(item, cit.doc_id)"
+                      @click="resolveAdoptDoc(item, docId)"
                     >
-                      Adopt Doc {{ cit.doc_id }} Terms
+                      Adopt Doc {{ docId }} Terms
                     </button>
                     <button
                       class="btn btn-outline sm"
@@ -879,409 +895,472 @@ function downloadReport() {
 </template>
 
 <style scoped>
-.workspace {
+/* =========================================================
+   REDUCTO STUDIO SHELL (LEFT SIDEBAR + WHITE CANVAS)
+   ========================================================= */
+.studio-shell {
   min-height: 100vh;
-  background: var(--paper);
+  display: grid;
+  grid-template-columns: 236px minmax(0, 1fr);
+  background: var(--surface);
   color: var(--ink);
-  display: flex;
-  flex-direction: column;
 }
 
-/* Header */
-.app-nav {
-  height: 64px;
-  background: var(--dark);
-  color: var(--cream);
-  border-bottom: 1px solid var(--hairline-dark);
+.studio-sidebar {
+  background: var(--paper);
+  border-right: 1px solid var(--hairline);
   display: flex;
-  align-items: center;
+  flex-direction: column;
   justify-content: space-between;
-  padding: 0 clamp(20px, 3vw, 40px);
-}
-
-.nav-left {
-  display: flex;
-  align-items: center;
-  gap: 32px;
-}
-
-.brand {
-  display: inline-flex;
-  align-items: center;
-  gap: 9px;
-  font-size: 18px;
-  font-weight: 500;
-  color: var(--cream);
-}
-
-.project-selector {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.project-select {
-  background: #24231C;
-  color: var(--cream);
-  border: 1px solid var(--hairline-dark);
-  padding: 6px 12px;
-  border-radius: 2px;
-  font-family: var(--font-body);
-  font-size: 13.5px;
-  cursor: pointer;
-}
-
-.project-select:focus {
-  outline: none;
-  border-color: var(--gold);
-}
-
-.btn-new-proj {
-  background: transparent;
-  color: var(--gold);
-  border: 1px solid var(--hairline-dark);
-  padding: 5px 10px;
-  border-radius: 2px;
-  font-size: 12px;
-  font-family: var(--font-mono);
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.btn-new-proj:hover {
-  background: rgba(194, 164, 92, 0.15);
-  border-color: var(--gold);
-}
-
-.nav-right {
-  display: flex;
-  align-items: center;
-  gap: 20px;
-}
-
-.user-pill {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.avatar {
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
-  background: var(--gold);
-  color: var(--dark);
-  display: grid;
-  place-items: center;
-  font-weight: 600;
-  font-size: 13px;
-}
-
-.user-meta {
-  display: flex;
-  flex-direction: column;
-}
-
-.uname {
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--cream);
-}
-
-.uemail {
-  font-size: 11px;
-  color: var(--cream-soft);
-}
-
-/* Tabs */
-.stage-tabs {
-  background: var(--paper-deep);
-  border-bottom: 1px solid var(--hairline);
-  display: grid;
-  grid-template-columns: repeat(5, 1fr);
-  padding: 0 clamp(20px, 3vw, 40px);
-}
-
-.stage-tab {
-  background: transparent;
-  border: none;
-  border-bottom: 2px solid transparent;
   padding: 16px 12px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-  cursor: pointer;
-  transition: all 0.2s;
-  color: var(--ink-soft);
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow-y: auto;
 }
 
-.stage-tab:hover {
-  color: var(--ink);
-  background: rgba(26, 25, 23, 0.02);
-}
-
-.stage-tab.active {
-  color: var(--ink);
-  border-bottom-color: var(--ink);
-  font-weight: 600;
-}
-
-.stage-num {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--gold);
-}
-
-.stage-label {
-  font-size: 14px;
-}
-
-.badge {
-  font-family: var(--font-mono);
-  font-size: 10px;
-  background: rgba(26, 25, 23, 0.08);
-  padding: 2px 7px;
-  border-radius: 999px;
-}
-
-.badge.alert {
-  background: #B5532A;
-  color: #fff;
-}
-
-/* Content Main */
-.app-main {
-  flex: 1;
-  max-width: 1240px;
-  width: 100%;
-  margin: 0 auto;
-  padding: 36px clamp(20px, 3vw, 40px) 60px;
-  display: flex;
-  flex-direction: column;
-  gap: 24px;
-}
-
-.content-header h2 {
-  font-size: 1.8rem;
-  margin: 6px 0 4px;
-}
-
-.soft {
-  color: var(--ink-soft);
-  max-width: 680px;
-  font-size: 14.5px;
-}
-
-.error-banner {
-  background: rgba(181, 83, 42, 0.1);
-  border-left: 3px solid #B5532A;
-  padding: 12px 18px;
-  color: #8A3B1B;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  font-size: 14px;
-}
-.error-banner button {
-  background: none;
-  border: none;
-  cursor: pointer;
-  font-size: 16px;
-  color: inherit;
-}
-
-/* Dropzone */
-.dropzone {
-  border: 2px dashed var(--hairline-strong);
-  background: rgba(255, 255, 255, 0.4);
-  padding: 44px 24px;
-  border-radius: 2px;
-  text-align: center;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 12px;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.dropzone:hover, .dropzone.dragging {
-  border-color: var(--ink);
-  background: #fff;
-}
-
-.drop-icon {
-  font-size: 32px;
-}
-
-.drop-text strong {
-  display: block;
-  font-size: 15px;
-}
-
-.drop-text small {
-  color: var(--ink-faint);
-  font-size: 12px;
-}
-
-.hidden-file-input {
-  display: none;
-}
-
-.upload-success {
-  padding: 12px 16px;
-  background: rgba(94, 122, 74, 0.12);
-  color: #4D6B3A;
-  border-radius: 2px;
-  font-size: 14px;
-}
-
-/* Table Card */
-.table-card {
-  background: var(--paper);
-  padding: 24px;
+.sidebar-top {
   display: flex;
   flex-direction: column;
   gap: 18px;
 }
 
-.table-card-head {
+.sidebar-brand-row {
   display: flex;
-  justify-content: space-between;
   align-items: center;
+  justify-content: space-between;
+  padding: 4px 8px;
 }
 
-.table-card-head h3 {
-  font-size: 1.25rem;
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15.5px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--ink);
 }
 
-.table-responsive {
-  overflow-x: auto;
+.sidebar-icon-btn {
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  border: 1px solid var(--hairline);
+  background: var(--surface);
+  color: var(--ink-soft);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.sidebar-icon-btn:hover {
+  background: var(--dark);
+  color: #FFFFFF;
+  border-color: var(--dark);
 }
 
-table {
+.sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.snav-item {
   width: 100%;
-  border-collapse: collapse;
-}
-
-th, td {
-  padding: 14px 18px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ink-soft);
+  font-size: 13.5px;
+  font-weight: 500;
+  cursor: pointer;
   text-align: left;
-  border-bottom: 1px solid var(--hairline);
-  font-size: 14px;
+  transition: background 0.14s, color 0.14s;
 }
 
-th {
+.snav-item:hover {
+  background: #EFEFF1;
+  color: var(--ink);
+}
+
+.snav-item.active {
+  background: #EAEAEF;
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.snav-count {
+  margin-left: auto;
   font-family: var(--font-mono);
   font-size: 10.5px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
   color: var(--ink-faint);
 }
 
-.filename-cell {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.status-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 10px;
-  border-radius: 999px;
+.snav-badge.alert {
+  margin-left: auto;
   font-family: var(--font-mono);
   font-size: 10px;
-  letter-spacing: 0.06em;
+  font-weight: 600;
+  background: var(--dark);
+  color: #FFFFFF;
+  padding: 2px 7px;
+  border-radius: 999px;
 }
 
-.status-badge .dot {
-  width: 6px;
-  height: 6px;
+.snav-dot {
+  margin-left: auto;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
-}
-
-.status-badge.parsed {
-  background: rgba(94, 122, 74, 0.15);
-  color: #4D6B3A;
-}
-.status-badge.parsed .dot { background: #4D6B3A; }
-
-.status-badge.processing {
-  background: rgba(2, 113, 254, 0.12);
-  color: #0271FE;
-}
-.status-badge.processing .dot {
-  background: #0271FE;
+  background: var(--dark);
   animation: pulse 1.2s infinite;
 }
 
-.status-badge.queued {
-  background: rgba(194, 164, 92, 0.2);
-  color: #7A6028;
+/* Sidebar Projects */
+.sidebar-projects {
+  border-top: 1px solid var(--hairline);
+  padding-top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
-.status-badge.queued .dot { background: #7A6028; }
 
-.status-badge.failed {
-  background: rgba(181, 83, 42, 0.15);
-  color: #B5532A;
+.sidebar-sec-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 8px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-faint);
 }
-.status-badge.failed .dot { background: #B5532A; }
 
-.btn-text {
-  background: none;
+.sidebar-add-link {
   border: none;
+  background: none;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+.sidebar-add-link:hover { color: var(--ink); }
+
+.sidebar-proj-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sidebar-proj-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--ink-soft);
+  cursor: pointer;
+  transition: background 0.14s, color 0.14s;
+}
+.sidebar-proj-item:hover {
+  background: #EFEFF1;
+  color: var(--ink);
+}
+.sidebar-proj-item.active {
+  background: var(--dark);
+  color: #FFFFFF;
+  font-weight: 500;
+}
+.proj-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.proj-cnt {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  opacity: 0.65;
+}
+
+/* Sidebar Footer */
+.sidebar-footer {
+  border-top: 1px solid var(--hairline);
+  padding-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sidebar-user {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 0 4px;
+}
+
+.avatar-sq {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  background: var(--dark);
+  color: #FFFFFF;
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.user-meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.uname {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.uemail {
+  font-size: 11px;
+  color: var(--ink-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-logout {
+  width: 100%;
+  padding: 7px 10px;
+  border-radius: 7px;
+  border: 1px solid var(--hairline);
+  background: var(--surface);
+  color: var(--ink-soft);
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.sidebar-logout:hover {
+  background: var(--dark);
+  color: #FFFFFF;
+  border-color: var(--dark);
+}
+
+/* =========================================================
+   MAIN WORKSPACE AREA
+   ========================================================= */
+.app-main {
+  flex: 1;
+  width: 100%;
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 32px clamp(20px, 4vw, 48px) 72px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.tab-content {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  animation: fadeSlideUp 0.25s cubic-bezier(.22, 1, .36, 1);
+}
+
+.content-header h2 {
+  font-family: var(--font-body);
+  font-size: clamp(1.5rem, 2.2vw, 1.85rem);
+  font-weight: 600;
+  letter-spacing: -0.025em;
+  margin: 4px 0 6px;
+  color: var(--ink);
+}
+
+.soft {
+  color: var(--ink-soft);
+  max-width: 720px;
+  font-size: 14px;
+}
+
+.gold { color: var(--ink); }
+.faint { color: var(--ink-faint); }
+
+/* =========================================================
+   ANIMATED RECONCILIATION LOADING BAR
+   ========================================================= */
+.reconcile-loader-card {
+  background: var(--surface);
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--radius-md);
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  box-shadow: var(--shadow-md);
+  animation: fadeSlideUp 0.2s ease;
+}
+
+.loader-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.loader-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.loader-pulse {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--dark);
+  animation: pulse 1.2s infinite;
+}
+
+.loader-step-pill {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  background: var(--dark);
+  color: #FFFFFF;
+  padding: 3px 9px;
+  border-radius: 999px;
+}
+
+.loader-msg {
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--ink);
+}
+
+.loader-pct {
   font-family: var(--font-mono);
   font-size: 12px;
+  font-weight: 600;
   color: var(--ink);
-  cursor: pointer;
-  text-decoration: underline;
-  padding: 4px 6px;
 }
 
-.btn-text.alert {
-  color: #B5532A;
+.loader-track {
+  width: 100%;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--paper-deep);
+  overflow: hidden;
+  position: relative;
+}
+
+.loader-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--dark);
+  position: relative;
+  overflow: hidden;
+  transition: width 0.55s cubic-bezier(.22, 1, .36, 1);
+}
+
+.loader-shimmer {
+  position: absolute;
+  inset: 0;
+  width: 45%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.35), transparent);
+  animation: shimmerSlide 1.4s ease-in-out infinite;
+}
+
+.error-banner {
+  background: var(--danger-soft);
+  border-left: 3px solid var(--danger);
+  border-radius: var(--radius-sm);
+  padding: 12px 16px;
+  color: var(--danger);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 13.5px;
+  font-weight: 500;
+}
+.error-banner button {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 15px;
+  color: inherit;
 }
 
 .empty-state {
   text-align: center;
-  padding: 50px 20px;
+  padding: 52px 24px;
   color: var(--ink-soft);
-}
-
-/* Reconcile Tab */
-.reconcile-controls {
-  background: var(--paper);
-  padding: 24px;
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  align-items: center;
+  gap: 10px;
 }
 
-.control-row {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 32px;
+/* =========================================================
+   TAB 2: RECONCILE & CLUSTERS (CLEAN, NO THRESHOLD)
+   ========================================================= */
+.reconcile-controls {
+  background: var(--surface);
+  padding: 22px 24px;
+  border: 1px solid var(--hairline);
+}
+
+.reconcile-top-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+
+.doc-selection-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
 .warning-text {
-  color: #B5532A;
+  color: var(--danger);
   font-size: 13px;
-  margin: 6px 0;
+  font-weight: 500;
+  margin: 4px 0;
 }
 
 .success-text {
-  color: #4D6B3A;
+  color: var(--success);
   font-size: 13px;
-  margin: 6px 0;
+  font-weight: 500;
+  margin: 4px 0;
 }
 
 .selection-actions {
   display: flex;
-  gap: 12px;
-  margin-top: 8px;
+  gap: 14px;
+  margin-top: 4px;
 }
 
 .btn-link {
@@ -1290,52 +1369,52 @@ th {
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--ink-soft);
-  text-decoration: underline;
+  border-bottom: 1px solid var(--hairline-strong);
   cursor: pointer;
+  padding-bottom: 1px;
 }
-
-.params-group {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-
-.param-item {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  font-size: 13px;
-}
-
-.input-sm {
-  width: 120px;
-  padding: 6px 10px;
-  border: 1px solid var(--hairline-strong);
-  font-family: var(--font-mono);
+.btn-link:hover {
+  color: var(--ink);
+  border-color: var(--ink);
 }
 
 .reconcile-actions {
   display: flex;
-  gap: 14px;
-  justify-content: flex-end;
-  border-top: 1px solid var(--hairline);
-  padding-top: 18px;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 
 /* Dabbe Grid */
-.dabbe-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
-  gap: 18px;
-  margin-top: 14px;
-}
-
-.dabba-card {
-  background: var(--paper);
-  padding: 20px;
+.clusters-section {
   display: flex;
   flex-direction: column;
   gap: 14px;
+}
+
+.section-title h3 {
+  font-size: 1.25rem;
+  font-weight: 600;
+  margin-top: 4px;
+}
+
+.dabbe-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 16px;
+}
+
+.dabba-card {
+  background: var(--surface);
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.dabba-card:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-md);
 }
 
 .dabba-head {
@@ -1348,18 +1427,20 @@ th {
 .dabba-badge {
   font-family: var(--font-mono);
   font-size: 11px;
-  background: var(--olive);
-  color: var(--cream);
-  padding: 3px 8px;
-  border-radius: 2px;
+  font-weight: 500;
+  background: var(--dark);
+  color: #FFFFFF;
+  padding: 3px 9px;
+  border-radius: 6px;
 }
 
 .docs-tag, .chunks-tag {
   font-family: var(--font-mono);
-  font-size: 11px;
-  background: rgba(26, 25, 23, 0.06);
+  font-size: 10.5px;
+  background: var(--paper-deep);
+  color: var(--ink-soft);
   padding: 3px 8px;
-  border-radius: 2px;
+  border-radius: 6px;
 }
 
 .passages-stack {
@@ -1369,16 +1450,18 @@ th {
 }
 
 .passage-box {
-  background: rgba(26, 25, 23, 0.03);
-  border-left: 2px solid var(--gold);
+  background: var(--paper);
+  border-left: 2.5px solid var(--ink);
+  border-radius: 0 6px 6px 0;
   padding: 10px 12px;
 }
 
 .passage-doc {
   display: block;
   font-family: var(--font-mono);
-  font-size: 10px;
-  color: var(--copper);
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--ink);
   margin-bottom: 4px;
 }
 
@@ -1391,155 +1474,191 @@ th {
   text-overflow: ellipsis;
 }
 
-/* Result Summary */
+/* Result Summary Banner */
 .result-summary {
   background: var(--dark);
-  color: var(--cream);
-  padding: 28px;
+  color: #FFFFFF;
+  padding: 24px 28px;
+  border-color: var(--hairline-dark);
   display: flex;
   justify-content: space-between;
   align-items: center;
   flex-wrap: wrap;
-  gap: 20px;
+  gap: 18px;
 }
 
+.result-summary .gold { color: #A1A1AA; }
+
 .result-summary h3 {
-  font-size: 1.3rem;
+  font-size: 1.25rem;
+  font-weight: 600;
   margin: 6px 0 12px;
 }
 
-.stats-row {
-  display: flex;
-  gap: 12px;
+.result-summary code {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  background: rgba(255, 255, 255, 0.1);
+  padding: 2px 8px;
+  border-radius: 4px;
+  color: #FFFFFF;
 }
 
+.stats-row { display: flex; gap: 10px; flex-wrap: wrap; }
+
 .stat-pill {
-  padding: 6px 12px;
-  border-radius: 2px;
+  padding: 5px 12px;
+  border-radius: 999px;
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 11.5px;
 }
 
 .stat-pill.danger {
-  background: rgba(181, 83, 42, 0.25);
-  color: #FFA585;
+  background: rgba(185, 28, 28, 0.25);
+  color: #FCA5A5;
 }
 
 .stat-pill.success {
-  background: rgba(94, 122, 74, 0.25);
-  color: #A3D485;
+  background: rgba(21, 128, 61, 0.25);
+  color: #86EFAC;
 }
 
-.summary-right {
-  display: flex;
-  gap: 12px;
+.summary-right { display: flex; gap: 10px; flex-wrap: wrap; }
+
+.result-summary .btn-ink {
+  background: #FFFFFF;
+  color: var(--dark);
+}
+.result-summary .btn-ink:hover { background: #E4E4E7; }
+.result-summary .btn-outline {
+  background: transparent;
+  color: #FFFFFF;
+  border-color: var(--hairline-dark);
+}
+.result-summary .btn-outline:hover {
+  border-color: #71717A;
+  background: rgba(255, 255, 255, 0.08);
 }
 
-/* Review Stage Cards */
+/* =========================================================
+   TAB 3: HUMAN REVIEW GATE
+   ========================================================= */
 .review-items-stack {
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 18px;
 }
 
 .conflict-card {
-  background: var(--paper);
-  padding: 24px;
+  background: var(--surface);
+  padding: 24px 26px;
   display: flex;
   flex-direction: column;
   gap: 16px;
+  border-left: 3.5px solid var(--dark);
+  transition: box-shadow 0.2s ease, opacity 0.2s ease;
 }
 
+.conflict-card:hover { box-shadow: var(--shadow-md); }
+
 .conflict-card.resolved {
-  opacity: 0.75;
-  border-color: #5E7A4A;
+  opacity: 0.8;
+  border-left-color: var(--success);
+  background: #FCFEFD;
 }
 
 .card-top {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
+  gap: 14px;
+  flex-wrap: wrap;
 }
 
-.badges {
-  display: flex;
-  gap: 8px;
-  margin-bottom: 8px;
+.topic-info h3 {
+  font-size: 1.2rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--ink);
 }
+
+.badges { display: flex; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
 
 .tag {
   font-family: var(--font-mono);
   font-size: 10px;
+  font-weight: 600;
   padding: 3px 8px;
-  border-radius: 2px;
-  letter-spacing: 0.08em;
+  border-radius: 999px;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
 }
 
-.tag-danger {
-  background: rgba(181, 83, 42, 0.15);
-  color: #B5532A;
-}
-
-.tag-sev.high {
-  background: rgba(201, 129, 87, 0.2);
-  color: var(--copper);
-}
-
-.tag-sev.medium {
-  background: rgba(194, 164, 92, 0.2);
-  color: #7A6028;
-}
-
-.tag-status.pending {
-  background: #B5532A;
-  color: #fff;
-}
-
-.tag-status.resolved {
-  background: #5E7A4A;
-  color: #fff;
-}
+.tag-danger { background: var(--danger-soft); color: var(--danger); }
+.tag-sev.high { background: var(--paper-deep); color: var(--ink); }
+.tag-sev.medium { background: var(--paper-deep); color: var(--ink-soft); }
+.tag-status.pending { background: var(--dark); color: #FFFFFF; }
+.tag-status.resolved { background: var(--success); color: #FFFFFF; }
 
 .thread-info {
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--ink-faint);
+  background: var(--paper);
+  padding: 3px 9px;
+  border-radius: 6px;
 }
 
 .conflict-summary {
-  font-size: 14.5px;
-  line-height: 1.6;
+  font-size: 14px;
+  line-height: 1.65;
   color: var(--ink);
+}
+
+.citations-container {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .citations-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
   gap: 12px;
-  margin-top: 8px;
 }
 
 .cit-box {
-  background: rgba(26, 25, 23, 0.04);
-  padding: 12px 14px;
-  border-left: 2px solid var(--copper);
+  background: var(--paper);
+  padding: 13px 15px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--hairline);
+  border-left: 2.5px solid var(--ink);
 }
 
 .cit-head {
   display: flex;
   justify-content: space-between;
+  align-items: center;
   font-family: var(--font-mono);
-  font-size: 10px;
-  color: var(--ink-faint);
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--ink);
   margin-bottom: 6px;
+}
+
+.cit-page {
+  background: var(--surface);
+  color: var(--ink-soft);
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--hairline);
 }
 
 .cit-quote {
   font-family: var(--font-mono);
   font-size: 12px;
   color: var(--ink-soft);
-  line-height: 1.5;
+  line-height: 1.55;
 }
 
 .card-bottom {
@@ -1547,25 +1666,34 @@ th {
   padding-top: 14px;
 }
 
-.actions-group {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
+.actions-group { display: flex; flex-direction: column; gap: 8px; }
+.buttons-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.buttons-row .btn.sm { padding: 7px 14px; font-size: 12.5px; }
 
-.buttons-row {
-  display: flex;
-  gap: 10px;
-  flex-wrap: wrap;
+.buttons-row .btn-outline.alert {
+  color: var(--danger);
+  border-color: rgba(185, 28, 28, 0.3);
+}
+.buttons-row .btn-outline.alert:hover {
+  background: var(--danger-soft);
+  border-color: var(--danger);
 }
 
 .resolution-badge {
-  color: #4D6B3A;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--success-soft);
+  color: var(--success);
+  padding: 7px 13px;
+  border-radius: 6px;
   font-weight: 500;
-  font-size: 13.5px;
+  font-size: 13px;
 }
 
-/* Deliverable Tab */
+/* =========================================================
+   TAB 4: DELIVERABLES & COMPLIANCE
+   ========================================================= */
 .deliverable-header {
   display: flex;
   justify-content: space-between;
@@ -1574,127 +1702,28 @@ th {
   gap: 16px;
 }
 
-.deliverable-actions {
-  display: flex;
-  gap: 10px;
-}
-
-.deliverables-stack {
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
-}
+.deliverable-actions { display: flex; gap: 8px; }
+.deliverables-stack { display: flex; flex-direction: column; gap: 16px; }
 
 .deliverable-card {
-  background: var(--paper);
-  padding: 28px;
+  background: var(--surface);
+  padding: 24px 28px;
   display: flex;
   flex-direction: column;
-  gap: 16px;
-}
-
-.compliance-audit {
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
-  padding: 24px;
-}
-
-.source-truth-selector {
-  align-items: flex-end;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 16px;
-  justify-content: space-between;
-  margin-bottom: 20px;
-  padding: 20px;
-}
-
-.source-truth-selector .field {
-  flex: 1;
-  min-width: 260px;
-}
-
-.compliance-summary {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 24px;
-  justify-content: space-between;
-}
-
-.compliance-summary h3,
-.compliance-summary p {
-  margin-top: 6px;
-}
-
-.compliance-rule {
-  border-top: 1px solid var(--hairline);
-  padding-top: 18px;
-}
-
-.finalize-deliverable {
-  border-top: 1px solid var(--hairline);
-  display: flex;
-  justify-content: flex-end;
-  padding-top: 18px;
-}
-
-.compliance-rule-header {
-  align-items: flex-start;
-  display: flex;
-  gap: 16px;
-  justify-content: space-between;
-}
-
-.compliance-rule-header h3 {
-  font-size: 1rem;
-  font-weight: 500;
-}
-
-.compliance-rule ul {
-  margin-top: 12px;
-  padding-left: 20px;
-}
-
-.compliance-rule li {
-  margin-top: 8px;
-}
-
-.compliance-result {
-  border-radius: 2px;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  padding: 4px 8px;
-}
-
-.compliance-result.pass {
-  background: rgba(77, 107, 58, 0.12);
-  color: #4D6B3A;
-}
-
-.compliance-result.fail {
-  background: rgba(153, 66, 49, 0.12);
-  color: #994231;
-}
-
-.compliance-result.needs_review {
-  background: rgba(194, 164, 92, 0.18);
-  color: #80651F;
-}
-
-.compliance-result.not_applicable {
-  background: rgba(26, 25, 23, 0.08);
-  color: var(--ink-soft);
+  gap: 14px;
+  border-top: 2.5px solid var(--dark);
 }
 
 .deliv-head {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
+  gap: 12px;
 }
 
 .deliv-head h3 {
-  font-size: 1.4rem;
+  font-size: 1.25rem;
+  font-weight: 600;
   margin-top: 4px;
 }
 
@@ -1705,101 +1734,105 @@ th {
 }
 
 .deliv-text {
-  font-size: 15px;
-  line-height: 1.6;
+  font-size: 14.5px;
+  line-height: 1.65;
   color: var(--ink);
   white-space: pre-wrap;
 }
 
 .deliv-citations {
-  background: rgba(26, 25, 23, 0.03);
-  padding: 16px 18px;
-  border-left: 2px solid var(--olive);
+  background: var(--paper);
+  padding: 14px 16px;
+  border-radius: 6px;
+  border-left: 2.5px solid var(--dark);
   display: flex;
   flex-direction: column;
   gap: 8px;
 }
 
-.citations-row {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
+.citations-row { display: flex; flex-direction: column; gap: 6px; }
 
 .deliv-cit-chip {
   display: flex;
   gap: 10px;
+  align-items: baseline;
   font-size: 12.5px;
-  line-height: 1.5;
+  color: var(--ink-soft);
 }
 
 .deliv-cit-chip code {
   font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--copper);
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--ink);
+  background: var(--paper-deep);
+  padding: 2px 7px;
+  border-radius: 4px;
   white-space: nowrap;
 }
 
-.live-stream-ribbon {
-  background: #14130F;
-  border: 1px solid #C2A45C;
+.source-truth-selector {
+  align-items: flex-end;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  justify-content: space-between;
+  padding: 22px 24px;
+  background: var(--surface);
+}
+.source-truth-selector h3 { font-size: 1.15rem; font-weight: 600; margin: 4px 0; }
+.source-truth-selector .field { flex: 1; min-width: 240px; }
+
+.compliance-audit {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 24px;
+  background: var(--surface);
+}
+
+.compliance-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 24px;
+  justify-content: space-between;
+  padding: 16px 18px;
+  background: var(--paper);
   border-radius: 6px;
-  padding: 10px 16px;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 20px;
-  box-shadow: 0 4px 14px rgba(0,0,0,0.2);
+  border: 1px solid var(--hairline);
 }
-.stream-pulse {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background: #107C10;
-  box-shadow: 0 0 8px #107C10;
-  animation: pulse 1.5s infinite;
-}
-.stream-meta {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  font-size: 13px;
-}
-.stream-tag {
-  background: #C2A45C;
-  color: #14130F;
-  font-size: 10px;
-  font-weight: 800;
-  padding: 2px 7px;
-  border-radius: 3px;
-  letter-spacing: 0.5px;
-}
-.stream-stage {
-  color: #C2A45C;
-  font-weight: 700;
-}
-.stream-msg {
-  color: #F0EBE1;
-}
+.compliance-summary h3 { font-family: var(--font-mono); font-size: 1rem; color: var(--ink); margin-top: 4px; }
+.compliance-summary p { margin-top: 4px; font-weight: 500; }
 
-@media (max-width: 900px) {
-  .stage-tabs {
-    grid-template-columns: repeat(2, 1fr);
-  }
-  .control-row {
-    grid-template-columns: 1fr;
-  }
-}
+.compliance-rule { border-top: 1px solid var(--hairline); padding-top: 16px; }
+.finalize-deliverable { border-top: 1px solid var(--hairline); display: flex; justify-content: flex-end; padding-top: 18px; }
+.compliance-rule-header { display: flex; gap: 14px; justify-content: space-between; align-items: flex-start; }
+.compliance-rule-header h3 { font-size: 0.98rem; font-weight: 600; }
+.compliance-rule ul { margin-top: 10px; padding-left: 20px; }
+.compliance-rule li { margin-top: 6px; font-size: 13.5px; color: var(--ink-soft); }
 
-@media (max-width: 600px) {
-  .stage-tabs {
-    grid-template-columns: 1fr;
+.compliance-result {
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 3px 9px;
+}
+.compliance-result.pass { background: var(--success-soft); color: var(--success); }
+.compliance-result.fail { background: var(--danger-soft); color: var(--danger); }
+.compliance-result.needs_review { background: var(--paper-deep); color: var(--ink); }
+.compliance-result.not_applicable { background: var(--paper-deep); color: var(--ink-soft); }
+
+@media (max-width: 860px) {
+  .studio-shell { grid-template-columns: 1fr; }
+  .studio-sidebar {
+    position: static;
+    height: auto;
+    border-right: none;
+    border-bottom: 1px solid var(--hairline);
   }
-  .nav-left {
-    gap: 14px;
-  }
-  .user-meta {
-    display: none;
-  }
+  .sidebar-nav { flex-direction: row; flex-wrap: wrap; }
+  .snav-item { width: auto; }
+  .sidebar-projects { display: none; }
 }
 </style>

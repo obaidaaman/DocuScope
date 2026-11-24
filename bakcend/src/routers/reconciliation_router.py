@@ -24,10 +24,13 @@ from ..controller.reconciliation_controller import (
     run_reconciliation_controller,
     get_review_items_controller,
     get_deliverable_sections_controller,
+    get_deliverable_report_controller,
+    resolve_review_items_controller
+)
+from ..controller.compliance_controller import (
     get_compliance_audit_controller,
     start_compliance_check_controller,
     finalize_deliverable_controller,
-    resolve_review_items_controller
 )
 from ..reconciliation.live_pipeline import execute_live_pipeline_workflow
 
@@ -239,6 +242,14 @@ async def get_deliverable_sections(
     db: AsyncSession = Depends(get_db)
 ) -> List[Dict[str, Any]]:
     return await get_deliverable_sections_controller(thread_id=thread_id, db=db)
+
+
+@router.get("/{thread_id}/deliverable-report")
+async def get_deliverable_report(
+    thread_id: str,
+    db: AsyncSession = Depends(get_db)
+) -> Dict[str, Any]:
+    return await get_deliverable_report_controller(thread_id=thread_id, db=db)
 
 
 @router.get("/{thread_id}/compliance")

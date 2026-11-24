@@ -1,13 +1,24 @@
 import os
 from typing import List, Any, Dict
+import certifi
 from dotenv import load_dotenv
+
+
+if not os.getenv("SSL_CERT_FILE"):
+    try:
+        os.environ["SSL_CERT_FILE"] = certifi.where()
+    except Exception:
+        pass
+
 from unstructured_transform_client import TransformClient
+from unstructured_transform_client._generated import rest
 from unstructured.staging.base import elements_from_dicts
 from unstructured.chunking.title import chunk_by_title
 
 load_dotenv()
 
 UNSTRUCTURED_API_KEY = os.getenv("UNSTRUCTURED_API_KEY")
+UNSTRUCTURED_API_URL = os.getenv("UNSTRUCTURED_API_URL")
 
 def partition_and_chunk_pdf(file_path: str) -> List[Any]:
     """
@@ -19,9 +30,25 @@ def partition_and_chunk_pdf(file_path: str) -> List[Any]:
     if not UNSTRUCTURED_API_KEY:
         raise ValueError("UNSTRUCTURED_API_KEY is required for serverless PDF partitioning.")
 
-    client = TransformClient(api_key=UNSTRUCTURED_API_KEY)
+    client_kwargs = {"api_key": UNSTRUCTURED_API_KEY}
+    if UNSTRUCTURED_API_URL:
+        clean_url = UNSTRUCTURED_API_URL.rstrip("/")
+        if clean_url.endswith("/api/v2"):
+            clean_url = clean_url[:-7]
+        client_kwargs["server_url"] = clean_url
 
-    print(f"☁️ [SERVERLESS UNSTRUCTURED] Uploading {os.path.basename(file_path)} to Unstructured Cloud...")
+    client = TransformClient(**client_kwargs)
+
+    verify_ssl = os.getenv("UNSTRUCTURED_VERIFY_SSL", "true").lower() not in ("false", "0", "no")
+    if hasattr(client, "_api_client") and hasattr(client._api_client, "configuration"):
+        if not verify_ssl:
+            client._api_client.configuration.verify_ssl = False
+            client._api_client.rest_client = rest.RESTClientObject(client._api_client.configuration)
+        elif not client._api_client.configuration.ssl_ca_cert:
+            client._api_client.configuration.ssl_ca_cert = certifi.where()
+            client._api_client.rest_client = rest.RESTClientObject(client._api_client.configuration)
+
+    print(f"[SERVERLESS UNSTRUCTURED] Uploading {os.path.basename(file_path)} to Unstructured Cloud...")
     
     with open(file_path, "rb") as f:
         response = client.parse.run(input=f, output="elements")
@@ -67,7 +94,7 @@ def partition_and_chunk_pdf(file_path: str) -> List[Any]:
         elements=unstructured_elements,
         max_characters=3000,
         new_after_n_chars=2400,
-        combine_text_under_n_chars=500
+        combine_text_under_n_chars=0
     )
 
     print(f"✅ Chunking complete: {len(chunks)} smart chunks generated with page numbers.")

@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, Any
 from fastapi import HTTPException, status, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from ..models.db_models import Organization, User, RefreshToken
 from .schemas import Register, Login
@@ -207,23 +207,63 @@ async def refresh_access_token_controller(request: Request, response: Response, 
     }
 
 async def revoke_refresh_token_controller(request: Request, response: Response, db: AsyncSession) -> Dict[str, Any]:
-    token = request.cookies.get("refresh_token")
-    if token:
+    # Extract refresh token from cookie or Authorization header
+    refresh_token = request.cookies.get("refresh_token")
+    if not refresh_token:
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            refresh_token = auth_header.split(" ")[1]
+
+    user_id = None
+    if refresh_token:
         try:
-            payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+            payload = jwt.decode(refresh_token, SECRET_KEY, algorithms=[ALGORITHM], options={"verify_exp": False})
             jti = payload.get("jti")
+            if payload.get("sub"):
+                try:
+                    user_id = int(payload.get("sub"))
+                except (ValueError, TypeError):
+                    pass
             if jti:
                 query = select(RefreshToken).where(RefreshToken.jti == jti)
                 result = await db.execute(query)
                 db_token = result.scalar_one_or_none()
                 if db_token and not db_token.revoked_at:
                     db_token.revoked_at = get_utc_now()
-                    await db.commit()
         except Exception:
             pass
 
-    response.delete_cookie(key="access_token")
-    response.delete_cookie(key="refresh_token")
+    # If user_id wasn't in refresh token, check access_token
+    if not user_id:
+        access_token = request.cookies.get("access_token")
+        if not access_token:
+            auth_header = request.headers.get("Authorization")
+            if auth_header and auth_header.startswith("Bearer "):
+                access_token = auth_header.split(" ")[1]
+        if access_token:
+            try:
+                payload = jwt.decode(access_token, SECRET_KEY, algorithms=[ALGORITHM], options={"verify_exp": False})
+                if payload.get("sub"):
+                    user_id = int(payload.get("sub"))
+            except Exception:
+                pass
+
+    # Revoke all active refresh tokens for the user in the database
+    if user_id:
+        stmt = (
+            update(RefreshToken)
+            .where(RefreshToken.user_id == user_id, RefreshToken.revoked_at.is_(None))
+            .values(revoked_at=get_utc_now())
+        )
+        await db.execute(stmt)
+
+    await db.commit()
+
+    # Clear both cookies with matching flags so browsers reliably delete them
+    for key in ("access_token", "refresh_token"):
+        response.delete_cookie(key=key, path="/", httponly=True, samesite="lax")
+        response.delete_cookie(key=key, path="/")
+
     return {"success": True, "message": "Logged out successfully"}
 
 async def create_organization_controller(org_name: str, current_user: User, db: AsyncSession) -> Dict[str, Any]:

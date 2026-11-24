@@ -16,6 +16,11 @@ from ..reconciliation.schemas import (
 from ..reconciliation.compliance import check_and_broadcast_compliance
 from ..reconciliation.clusterer import build_topic_clusters
 from ..reconciliation.graph import reconciliation_graph
+from .compliance_controller import (
+    get_compliance_audit_controller,
+    start_compliance_check_controller,
+    finalize_deliverable_controller,
+)
 
 async def preview_clusters_controller(
     request: ReconciliationRequest,
@@ -149,76 +154,254 @@ async def get_deliverable_sections_controller(
     ]
 
 
-async def get_compliance_audit_controller(
+# compile all deliverable sections into a single comprehensive report
+async def get_deliverable_report_controller(
     thread_id: str,
     db: AsyncSession
 ) -> Dict[str, Any]:
-    audit = await db.scalar(
-        select(ComplianceAudit).where(ComplianceAudit.run_thread_id == thread_id)
-    )
-    if not audit:
-        return {
-            "thread_id": thread_id,
-            "source": "Demo grounding-compliance checklist",
-            "source_of_truth": "Ingested source documents and cited page text",
-            "status": "NOT_RUN",
-            "finalized": False,
-            "source_truth_doc_id": None,
-            "checks": [],
-        }
+    sections = await get_deliverable_sections_controller(thread_id, db)
 
+    # fetch filenames for all cited doc_ids in one query
+    cited_doc_ids = {
+        c.get("doc_id")
+        for s in sections
+        for c in (s.get("citations") or [])
+        if isinstance(c, dict) and isinstance(c.get("doc_id"), int)
+    }
+    doc_name_map: Dict[int, str] = {}
+    if cited_doc_ids:
+        doc_res = await db.execute(
+            select(Document.id, Document.filename).where(Document.id.in_(cited_doc_ids))
+        )
+        doc_name_map = {d_id: fname for d_id, fname in doc_res.all()}
+
+    report_lines = [
+        "# Reconciled Deliverable Report",
+        f"*Run Thread ID: `{thread_id}`*\n",
+        "---",
+        "## Table of Contents",
+    ]
+    for idx, s in enumerate(sections, 1):
+        report_lines.append(f"{idx}. [{s['title']}](#section-{idx})")
+    
+    report_lines.append("\n---\n")
+    for idx, s in enumerate(sections, 1):
+        report_lines.append(f"### <a id='section-{idx}'></a>{idx}. {s['title']}")
+        report_lines.append(s["committed_markdown"])
+        
+        cits = s.get("citations") or []
+        if cits:
+            report_lines.append("\n**Citations & Sources:**")
+            for c in cits:
+                quote = c.get("exact_quote", "")
+                page = c.get("page_number", "")
+                doc_id = c.get("doc_id")
+                doc_label = doc_name_map.get(doc_id, f"Doc #{doc_id}")
+                c["filename"] = doc_label
+                report_lines.append(f"- *{doc_label}, Page {page}:* \"{quote}\"")
+        report_lines.append("\n---\n")
+
+    full_markdown = "\n".join(report_lines)
     return {
-        **audit.result_json,
-        "checked_at": audit.checked_at,
-        "finalized": audit.finalized,
-        "source_truth_doc_id": audit.source_truth_doc_id,
+        "thread_id": thread_id,
+        "total_sections": len(sections),
+        "report_markdown": full_markdown,
+        "sections": sections
     }
 
 
-async def start_compliance_check_controller(
+# handle phase 2 compliance item resolution (approve as is, custom, reject)
+async def _resolve_compliance_review_item(
     thread_id: str,
-    request: ComplianceCheckRequest,
-    db: AsyncSession,
-) -> Dict[str, Any]:
-    source_document = await db.get(Document, request.source_truth_doc_id)
-    if (
-        not source_document
-        or source_document.status != "PARSED"
-        or source_document.project_id != request.project_id
-    ):
+    item: ReviewItem,
+    res_action: Any,
+    db: AsyncSession
+) -> None:
+    section_result = await db.execute(
+        select(DeliverableSection).where(
+            DeliverableSection.run_thread_id == thread_id,
+            DeliverableSection.category == item.category,
+        )
+    )
+    section = section_result.scalar_one_or_none()
+    if not section:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Deliverable section {item.category} was not found."
+        )
+
+    if res_action.action == "APPROVE_AS_IS":
+        content_hash = hashlib.sha256(
+            section.committed_markdown.encode("utf-8")
+        ).hexdigest()
+        item.resolution_notes = f"Action: APPROVE_AS_IS | SHA256:{content_hash}"
+
+    elif res_action.action == "CUSTOM_RESOLUTION" and res_action.custom_text:
+        section.title = item.category
+        section.committed_markdown = (
+            "**Analyst Approved Compliance Resolution:**\n\n"
+            f"{res_action.custom_text}"
+        )
+        section.citations_json = []
+        content_hash = hashlib.sha256(
+            section.committed_markdown.encode("utf-8")
+        ).hexdigest()
+        item.resolution_notes = f"Action: CUSTOM_RESOLUTION | SHA256:{content_hash}"
+
+    elif res_action.action == "REJECT":
+        section.title = f"{item.category} (Rejected)"
+        section.committed_markdown = (
+            "**Clause Rejected / Omitted:**\n\n"
+            "An analyst rejected this section during compliance review and omitted "
+            "it from the final deliverable."
+        )
+        section.citations_json = []
+        content_hash = hashlib.sha256(
+            section.committed_markdown.encode("utf-8")
+        ).hexdigest()
+        item.resolution_notes = f"Action: REJECT | SHA256:{content_hash}"
+
+    else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Select a parsed document from the active project as the source of truth."
+            detail="Choose approve as-is, provide a custom resolution, or reject the section."
         )
 
-    section_count = await db.scalar(
-        select(func.count(DeliverableSection.id)).where(
-            DeliverableSection.run_thread_id == thread_id
+
+# handle phase 1 reconciliation conflict resolution and update deliverable section
+async def _resolve_initial_conflict_item(
+    thread_id: str,
+    item: ReviewItem,
+    res_action: Any,
+    db: AsyncSession
+) -> None:
+    if res_action.action == "APPROVE_AS_IS":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Approve-as-is is only available for compliance review items."
+        )
+
+    section_title = item.category
+    matching_citations = []
+    committed_text = ""
+
+    # 1. APPROVE_DOC: Dynamically extract adopted document's verbatim clause & filter citations
+    if res_action.action == "APPROVE_DOC" and res_action.chosen_doc_id:
+        chosen_doc = await db.get(Document, res_action.chosen_doc_id)
+        doc_name = chosen_doc.filename if chosen_doc else f"Doc #{res_action.chosen_doc_id}"
+
+        # Keep only the citations from the winning approved document
+        matching_citations = [
+            c for c in (item.citations_json or [])
+            if c.get("doc_id") == res_action.chosen_doc_id
+        ]
+
+        if matching_citations:
+            quotes_text = "\n\n".join([f'"{c.get("exact_quote")}"' for c in matching_citations if c.get("exact_quote")])
+            committed_text = f"**Adopted Term from {doc_name}:**\n\n{quotes_text}"
+        else:
+            committed_text = f"**Adopted Term from {doc_name}**"
+
+        item.resolution_notes = f"Action: APPROVE_DOC | Adopted: {doc_name}"
+
+    # 2. CUSTOM_RESOLUTION: Analyst provided explicit negotiated clause
+    elif res_action.action == "CUSTOM_RESOLUTION" and res_action.custom_text:
+        committed_text = f"**Analyst Negotiated Resolution:**\n\n{res_action.custom_text}"
+        matching_citations = []
+        item.resolution_notes = f"Action: CUSTOM_RESOLUTION | {res_action.custom_text}"
+
+    # 3. REJECT: Explicit rejection note with audit trail (no silent deletion)
+    elif res_action.action == "REJECT":
+        section_title = f"{item.category} (Rejected)"
+        committed_text = (
+            f"**Clause Rejected / Omitted:**\n\n"
+            f"The contradictory terms for *{item.category}* across documents were explicitly "
+            f"rejected during legal review and are excluded from the reconciled agreement."
+        )
+        matching_citations = []
+        item.resolution_notes = "Action: REJECT"
+
+    else:
+        committed_text = item.summary
+        matching_citations = item.citations_json or []
+
+    # Idempotent: Update existing DeliverableSection or insert a new one
+    stmt = select(DeliverableSection).where(
+        DeliverableSection.run_thread_id == thread_id,
+        DeliverableSection.category == item.category
+    )
+    res = await db.execute(stmt)
+    existing_section = res.scalar_one_or_none()
+
+    if existing_section:
+        existing_section.title = section_title
+        existing_section.committed_markdown = committed_text
+        existing_section.citations_json = matching_citations
+    else:
+        new_section = DeliverableSection(
+            run_thread_id=thread_id,
+            category=item.category,
+            title=section_title,
+            committed_markdown=committed_text,
+            citations_json=matching_citations
+        )
+        db.add(new_section)
+
+
+# refresh compliance audit counts if a compliance item was resolved
+async def _update_audit_after_resolution(
+    thread_id: str,
+    db: AsyncSession
+) -> Dict[str, Any] | None:
+    audit = await db.scalar(
+        select(ComplianceAudit).where(
+            ComplianceAudit.run_thread_id == thread_id
         )
     )
-    if not section_count:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Create a deliverable before starting the source-of-truth comparison."
-        )
+    if not audit or not audit.source_truth_doc_id:
+        return None
 
-    pending_conflicts = await db.scalar(
-        select(func.count(ReviewItem.id)).where(
+    review_result = await db.execute(
+        select(ReviewItem).where(
             ReviewItem.run_thread_id == thread_id,
-            ReviewItem.item_type == "CONFLICT",
-            ReviewItem.status == "PENDING",
+            ReviewItem.item_type.in_(["CONFLICT", "COMPLIANCE"]),
         )
     )
-    if pending_conflicts:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Resolve the reconciliation conflicts before selecting the source of truth."
-        )
-
-    return await check_and_broadcast_compliance(
-        thread_id,
-        request.source_truth_doc_id,
+    review_items = review_result.scalars().all()
+    pending_conflicts = sum(
+        item.status == "PENDING" and item.item_type == "CONFLICT"
+        for item in review_items
     )
+    pending_compliance = sum(
+        item.status == "PENDING" and item.item_type == "COMPLIANCE"
+        for item in review_items
+    )
+    audit.status = (
+        "PENDING_REVIEW" if pending_conflicts
+        else "PENDING_COMPLIANCE_REVIEW" if pending_compliance
+        else "HUMAN_APPROVED"
+    )
+    audit.finalized = False
+    audit.result_json = {
+        **audit.result_json,
+        "status": audit.status,
+        "finalized": False,
+        "pending_conflicts": pending_conflicts,
+        "pending_compliance_reviews": pending_compliance,
+        "compliance_review_items": [
+            {
+                "id": item.id,
+                "category": item.category,
+                "summary": item.summary,
+                "status": item.status,
+                "resolution_notes": item.resolution_notes,
+            }
+            for item in review_items
+            if item.item_type == "COMPLIANCE"
+        ],
+    }
+    await db.commit()
+    return audit.result_json
 
 
 async def resolve_review_items_controller(
@@ -227,6 +410,7 @@ async def resolve_review_items_controller(
 ) -> Dict[str, Any]:
     resolved_count = 0
     resolved_compliance_item = False
+
     for res_action in request.resolutions:
         item = await db.get(ReviewItem, res_action.review_item_id)
         if not item or item.run_thread_id != request.thread_id:
@@ -238,233 +422,21 @@ async def resolve_review_items_controller(
         item.status = "RESOLVED"
         if item.item_type == "COMPLIANCE":
             resolved_compliance_item = True
-            section_result = await db.execute(
-                select(DeliverableSection).where(
-                    DeliverableSection.run_thread_id == request.thread_id,
-                    DeliverableSection.category == item.category,
-                )
-            )
-            section = section_result.scalar_one_or_none()
-            if not section:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail=f"Deliverable section {item.category} was not found."
-                )
-
-            if res_action.action == "APPROVE_AS_IS":
-                content_hash = hashlib.sha256(
-                    section.committed_markdown.encode("utf-8")
-                ).hexdigest()
-                item.resolution_notes = (
-                    f"Action: APPROVE_AS_IS | SHA256:{content_hash}"
-                )
-            elif res_action.action == "CUSTOM_RESOLUTION" and res_action.custom_text:
-                section.title = item.category
-                section.committed_markdown = (
-                    "**Analyst Approved Compliance Resolution:**\n\n"
-                    f"{res_action.custom_text}"
-                )
-                section.citations_json = []
-                content_hash = hashlib.sha256(
-                    section.committed_markdown.encode("utf-8")
-                ).hexdigest()
-                item.resolution_notes = (
-                    f"Action: CUSTOM_RESOLUTION | SHA256:{content_hash}"
-                )
-            elif res_action.action == "REJECT":
-                section.title = f"{item.category} (Rejected)"
-                section.committed_markdown = (
-                    "**Clause Rejected / Omitted:**\n\n"
-                    "An analyst rejected this section during compliance review and omitted "
-                    "it from the final deliverable."
-                )
-                section.citations_json = []
-                content_hash = hashlib.sha256(
-                    section.committed_markdown.encode("utf-8")
-                ).hexdigest()
-                item.resolution_notes = f"Action: REJECT | SHA256:{content_hash}"
-            else:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Choose approve as-is, provide a custom resolution, or reject the section."
-                )
-
-            resolved_count += 1
-            continue
-
-        if res_action.action == "APPROVE_AS_IS":
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Approve-as-is is only available for compliance review items."
-            )
-
-        section_title = item.category
-        matching_citations = []
-        committed_text = ""
-
-        # 1. APPROVE_DOC: Dynamically extract adopted document's verbatim clause & filter citations
-        if res_action.action == "APPROVE_DOC" and res_action.chosen_doc_id:
-            chosen_doc = await db.get(Document, res_action.chosen_doc_id)
-            doc_name = chosen_doc.filename if chosen_doc else f"Doc #{res_action.chosen_doc_id}"
-
-            # Keep only the citations from the winning approved document
-            matching_citations = [
-                c for c in (item.citations_json or [])
-                if c.get("doc_id") == res_action.chosen_doc_id
-            ]
-
-            if matching_citations:
-                quotes_text = "\n\n".join([f'"{c.get("exact_quote")}"' for c in matching_citations if c.get("exact_quote")])
-                committed_text = f"**Adopted Term from {doc_name}:**\n\n{quotes_text}"
-            else:
-                committed_text = f"**Adopted Term from {doc_name}**"
-
-            item.resolution_notes = f"Action: APPROVE_DOC | Adopted: {doc_name}"
-
-        # 2. CUSTOM_RESOLUTION: Analyst provided explicit negotiated clause
-        elif res_action.action == "CUSTOM_RESOLUTION" and res_action.custom_text:
-            committed_text = f"**Analyst Negotiated Resolution:**\n\n{res_action.custom_text}"
-            matching_citations = []
-            item.resolution_notes = f"Action: CUSTOM_RESOLUTION | {res_action.custom_text}"
-
-        # 3. REJECT: Explicit rejection note with audit trail (no silent deletion)
-        elif res_action.action == "REJECT":
-            section_title = f"{item.category} (Rejected)"
-            committed_text = (
-                f"**Clause Rejected / Omitted:**\n\n"
-                f"The contradictory terms for *{item.category}* across documents were explicitly "
-                f"rejected during legal review and are excluded from the reconciled agreement."
-            )
-            matching_citations = []
-            item.resolution_notes = "Action: REJECT"
-
+            await _resolve_compliance_review_item(request.thread_id, item, res_action, db)
         else:
-            committed_text = item.summary
-            matching_citations = item.citations_json or []
-
-        # Idempotent: Update existing DeliverableSection or insert a new one
-        stmt = select(DeliverableSection).where(
-            DeliverableSection.run_thread_id == request.thread_id,
-            DeliverableSection.category == item.category
-        )
-        res = await db.execute(stmt)
-        existing_section = res.scalar_one_or_none()
-
-        if existing_section:
-            existing_section.title = section_title
-            existing_section.committed_markdown = committed_text
-            existing_section.citations_json = matching_citations
-        else:
-            new_section = DeliverableSection(
-                run_thread_id=request.thread_id,
-                category=item.category,
-                title=section_title,
-                committed_markdown=committed_text,
-                citations_json=matching_citations
-            )
-            db.add(new_section)
+            await _resolve_initial_conflict_item(request.thread_id, item, res_action, db)
 
         resolved_count += 1
 
     await db.commit()
-    audit = await db.scalar(
-        select(ComplianceAudit).where(
-            ComplianceAudit.run_thread_id == request.thread_id
-        )
-    )
+
     compliance_audit = None
-    if resolved_compliance_item and audit and audit.source_truth_doc_id:
-        review_result = await db.execute(
-            select(ReviewItem).where(
-                ReviewItem.run_thread_id == request.thread_id,
-                ReviewItem.item_type.in_(["CONFLICT", "COMPLIANCE"]),
-            )
-        )
-        review_items = review_result.scalars().all()
-        pending_conflicts = sum(
-            item.status == "PENDING" and item.item_type == "CONFLICT"
-            for item in review_items
-        )
-        pending_compliance = sum(
-            item.status == "PENDING" and item.item_type == "COMPLIANCE"
-            for item in review_items
-        )
-        audit.status = (
-            "PENDING_REVIEW" if pending_conflicts
-            else "PENDING_COMPLIANCE_REVIEW" if pending_compliance
-            else "HUMAN_APPROVED"
-        )
-        audit.finalized = False
-        audit.result_json = {
-            **audit.result_json,
-            "status": audit.status,
-            "finalized": False,
-            "pending_conflicts": pending_conflicts,
-            "pending_compliance_reviews": pending_compliance,
-            "compliance_review_items": [
-                {
-                    "id": item.id,
-                    "category": item.category,
-                    "summary": item.summary,
-                    "status": item.status,
-                    "resolution_notes": item.resolution_notes,
-                }
-                for item in review_items
-                if item.item_type == "COMPLIANCE"
-            ],
-        }
-        await db.commit()
-        compliance_audit = audit.result_json
+    if resolved_compliance_item:
+        compliance_audit = await _update_audit_after_resolution(request.thread_id, db)
+
     return {
         "thread_id": request.thread_id,
         "resolved_items_count": resolved_count,
         "status": "COMPLETED",
         "compliance_audit": compliance_audit,
-    }
-
-
-async def finalize_deliverable_controller(
-    thread_id: str,
-    db: AsyncSession,
-) -> Dict[str, Any]:
-    audit = await db.scalar(
-        select(ComplianceAudit).where(ComplianceAudit.run_thread_id == thread_id)
-    )
-    if not audit:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Run the compliance check before finalizing the deliverable."
-        )
-    if not audit.source_truth_doc_id:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Select a source-of-truth document before finalizing."
-        )
-
-    pending_count = await db.scalar(
-        select(func.count(ReviewItem.id)).where(
-            ReviewItem.run_thread_id == thread_id,
-            ReviewItem.item_type.in_(["CONFLICT", "COMPLIANCE"]),
-            ReviewItem.status == "PENDING",
-        )
-    )
-    if pending_count:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Resolve all {pending_count} pending review item(s) before finalizing."
-        )
-
-    if audit.status not in ("COMPLIANT", "HUMAN_APPROVED"):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Deliverable cannot be finalized while compliance status is {audit.status}."
-        )
-
-    audit.finalized = True
-    audit.result_json = {**audit.result_json, "finalized": True}
-    await db.commit()
-    return {
-        "thread_id": thread_id,
-        "status": audit.status,
-        "finalized": True,
     }

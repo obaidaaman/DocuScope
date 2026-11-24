@@ -243,6 +243,64 @@ class SourceComparisonTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result[0]["status"], "INSUFFICIENT_EVIDENCE")
         judge.ainvoke.assert_not_called()
 
+    @patch("src.reconciliation.compliance.AsyncSessionLocal")
+    @patch("src.reconciliation.compliance.openai_client.embeddings.create")
+    @patch("src.reconciliation.compliance.compliance_judge")
+    async def test_merges_contiguous_neighbor_chunks_and_applies_min_similarity(
+        self, judge, create_embedding, session_factory
+    ):
+        create_embedding.return_value = SimpleNamespace(
+            data=[SimpleNamespace(embedding=[0.1, 0.2])]
+        )
+        judge.ainvoke = AsyncMock(return_value=BatchComplianceVerdict(
+            results=[{
+                "section_index": 0,
+                "status": "COMPLIANT",
+                "explanation": "Supported across merged neighbors.",
+                "unsupported_claims": [],
+                "evidence": [{
+                    "doc_id": 7,
+                    "page_number": 2,
+                    "exact_quote": "Payment is due in 30 days\n\nunless amended in writing.",
+                }],
+            }]
+        ))
+        chunks_result = MagicMock()
+        chunks_result.mappings.return_value.all.return_value = [
+            {
+                "section_index": 0,
+                "chunk_index": 4,
+                "page_number": 2,
+                "raw_text": "Payment is due in 30 days",
+            },
+            {
+                "section_index": 0,
+                "chunk_index": 5,
+                "page_number": 2,
+                "raw_text": "unless amended in writing.",
+            },
+        ]
+        session = AsyncMock()
+        session.execute.return_value = chunks_result
+        session_factory.return_value.__aenter__ = AsyncMock(return_value=session)
+        session_factory.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        result = await _compare_sections_with_source(
+            [{
+                "title": "Payment Terms",
+                "committed_markdown": "Payment is due in 30 days unless amended.",
+            }],
+            7,
+        )
+
+        self.assertEqual(result[0]["status"], "COMPLIANT")
+        self.assertEqual(len(result[0]["evidence"]), 1)
+        self.assertEqual(session.execute.await_args.args[1]["min_similarity"], 0.45)
+        self.assertIn(
+            "Payment is due in 30 days\\n\\nunless amended in writing.",
+            judge.ainvoke.await_args.args[0],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
